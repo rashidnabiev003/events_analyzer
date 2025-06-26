@@ -17,4 +17,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-package-dir = {"" = "events_analyzer"} 
+package-dir = {"" = "src"} 
