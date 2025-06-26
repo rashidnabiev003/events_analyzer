@@ -8,3 +8,4 @@ class OllamaConfig(BaseModel):
 
 class AppConfig(BaseModel):
     ollama: OllamaConfig
+

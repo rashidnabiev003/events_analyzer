@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "events_analyzer"
+version = "1.0.0"
+description = "Анализ и кластеризация мероприятий"
+authors = [{ name = "Набиев Рашидхон", email = "" }]
+requires-python = ">=3.12.10"
+dependencies = [
+    "pandas",
+    "sentence-transformers",
+    "scikit-learn",
+    "hdbscan",
+    "matplotlib",
+]
+
+[tool.setuptools]
+package-dir = {"" = "events_analyzer"} 
