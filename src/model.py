@@ -12,9 +12,18 @@ def load_config(path: str = r"src\configs\confis.json") -> AppConfig:
 cfg = load_config()
 MODEL = cfg.ollama.MODEL_NAME
 OLLAMA_URL = cfg.ollama.ollama_url.rstrip("/")
-MODEL_OPTIONS = {"temperature": 0.10, "repeat_penalty": 1.3, "top_p": 0.9, "num_ctx": 8046, "grammar": "ru"}
+MODEL_OPTIONS = {"temperature": 0.10,
+                "repeat_penalty": 1.3,
+                "top_p": 0.9,
+                "num_ctx": 8046,
+                "grammar": "ru",
+                "format":"json"}
 
-SYSTEM_PROMPT = ("")
+SYSTEM_PROMPT = (
+    "Ты ИИ ассистент который анализирует мероприятния."
+    "Отвечай коротко и СТРОГО на РУССКОМ языке."
+    "Вери JSON format"
+    )
 USER_PROMPT = ("")
 FEWSHOT_SUMMARY = ("")
 
@@ -49,7 +58,7 @@ class Ollama_chat:
                           ):
         
         messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": system_prompt}, 
         FEWSHOT_SUMMARY,
         {"role": "user", "content": transcript},
     ]

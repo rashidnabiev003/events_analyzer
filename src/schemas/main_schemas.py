@@ -9,3 +9,7 @@ class OllamaConfig(BaseModel):
 class AppConfig(BaseModel):
     ollama: OllamaConfig
 
+class ModelJsonAnswer(BaseModel):
+    theme : str
+    city : str
+    danger_class: str
