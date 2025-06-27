@@ -4,7 +4,7 @@ import json
 from typing  import Dict, List, Any
 from schemas.main_schemas  import AppConfig
 
-def load_config(path: str = r"C:\Repos\events_analyzer\configs\confis.json") -> AppConfig:
+def load_config(path: str = r"src\configs\confis.json") -> AppConfig:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return AppConfig(**data)
