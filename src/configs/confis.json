@@ -1,6 +1,6 @@
 {
     "ollama" : {
-    "MODEL_NAME":"qwen3:14b",
+    "MODEL_NAME":"gemma3:12b",
     "ollama_version":"0.7.0",
     "ollama_url":"http://localhost:11434"
     }
