@@ -5,9 +5,9 @@
     "ollama_url":"http://localhost:11434"
     },
     "webui_ollama" : {
-    "MODEL_NAME":"gemma3:12b",
+    "MODEL_NAME":"deepseek-r1:70b",
     "ollama_version":"0.7.0",
-    "ollama_url":"http://localhost:3000"
+    "ollama_url":"https://webui.g-309.ru"
     }
     
 }

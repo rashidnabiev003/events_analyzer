@@ -9,6 +9,7 @@ class OllamaConfig(BaseModel):
 
 class AppConfig(BaseModel):
     ollama: OllamaConfig
+    webui_ollama : OllamaConfig
 
 class ModelJsonAnswer(BaseModel):
     theme : str

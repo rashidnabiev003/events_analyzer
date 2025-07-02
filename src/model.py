@@ -1,7 +1,9 @@
 import json
 import re
+import httpx
 import sys
 import time
+import os
 from pathlib import Path
 import pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]   # = C:\Repos\events_analyzer
@@ -27,9 +29,11 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 
 cfg = load_config()
-
+WEBUI_KEY = os.getenv("WEBUI_API_KEY", "")
 OLLAMA_URL = cfg.ollama.ollama_url.rstrip("/")        
-MODEL_NAME = cfg.ollama.MODEL_NAME                  
+MODEL_NAME = cfg.ollama.MODEL_NAME 
+WEBUI_MODEL_NAME = cfg.webui_ollama.MODEL_NAME      
+WEBUI_URL = cfg.webui_ollama.ollama_url.rstrip("/")
 RAW_DIR = Path("data")
 RAW_DIR.mkdir(exist_ok=True)
 
@@ -91,7 +95,64 @@ json
 """
 
 
-def _ollama_chat(model: str, prompt: str, schema_model, temperature: float = 0.0):
+json_re = re.compile(r"\{[\s\S]*\}")
+
+def extract_json(text: str) -> dict:
+    # 1. убираем <think>…</think>
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
+
+    # 2. удаляем лишь маркеры ```json и ```
+    text = re.sub(r"```json\s*|\s*```", "", text, flags=re.I)
+
+    # 3. ищем первый {...}
+    m = json_re.search(text)
+    if not m:
+        raise ValueError("JSON not found in model output")
+    return json.loads(m.group(0))
+
+def webui_chat(
+    prompt: str,
+    model: str = WEBUI_MODEL_NAME,          
+    system_prompt: str | None = None,
+    json_schema: dict | None = None,  # передайте schema.model_json_schema() если нужен строгий JSON
+    temperature: float = 0.1,
+    timeout: float = 180.0,
+) -> str:
+    
+    headers = {"Content-Type": "application/json"}
+    if WEBUI_KEY:
+        headers["Authorization"] = f"Bearer {WEBUI_KEY}"
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "temperature": temperature,
+        "max_tokens": 1500,
+    }
+
+    # если хотим получить валидный JSON от модели – просим WebUI об этом
+    if json_schema is not None:
+        payload["response_format"] = {
+            "type": "json_object",
+            "schema": json_schema         
+        }
+
+    with httpx.Client(timeout=timeout) as client:
+        r = client.post(f"{WEBUI_URL}/api/chat/completions",
+                        headers=headers, json=payload)
+        r.raise_for_status()
+        print(r)
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+
+
+def _ollama_chat(model: str, prompt: str, schema_model, temperature: float = 0.1):
     """
     Отправляет prompt в Ollama и валидирует ответ с помощью schema_model (Pydantic).
     Возвращает экземпляр schema_model.
@@ -220,7 +281,6 @@ def risk_matrix(
     target_count: int = 10,          # сколько A-мероприятий взять (0 … target_count-1)
     top_n: int = 50,                 # для каждого A сколько кандидатов B
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
-    out_png: Path = RAW_DIR / "risk_heatmap.png",
     sleep_s: float = 0.25,
 ) -> None:
     """Считает матрицу (target_count × top_n) рисков и сохраняет CSV + PNG."""
@@ -251,12 +311,13 @@ def risk_matrix(
             prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
 
             try:
-                ans   = _ollama_chat(MODEL_NAME, prompt, RiskResp)
-                meta  = json.loads(ans)
+                ans = webui_chat(prompt, model=WEBUI_MODEL_NAME, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp.model_json_schema())
+                meta  = extract_json(ans)
                 risk  = float(meta.get("risk", 0.0))
                 reason = meta.get("reason", "")
-            except Exception:
-                risk, reason = 0.0, "parse_error"
+            except Exception as e:
+                risk, reason = None, "parse_error"
+                print("parse_error:", e)
 
             records.append(
                 {"A_id": a_id, "B_id": b_id, "risk": risk, "reason": reason}
@@ -269,20 +330,6 @@ def risk_matrix(
     out_csv.parent.mkdir(exist_ok=True, parents=True)
     mat_df.to_csv(out_csv, index=False, encoding="utf-8")
     print(f"✔ risk matrix CSV → {out_csv}")
-
-    # 2) картинка-heatmap  (pivot-таблица risk)
-    pivot = mat_df.pivot(index="A_id", columns="B_id", values="risk").fillna(0)
-    plt.figure(figsize=(10, 6))
-    plt.imshow(pivot, aspect="auto", origin="lower")
-    plt.colorbar(label="risk")
-    plt.xlabel("B_id (candidates)")
-    plt.ylabel("A_id (targets)")
-    plt.title("Матрица рисков  Aᵢ ← Bⱼ")
-    plt.tight_layout()
-    out_png.parent.mkdir(exist_ok=True, parents=True)
-    plt.savefig(out_png, dpi=150)
-    plt.close()
-    print(f"✔ Heat-map сохранён → {out_png}")
 
 def _usage() -> None:
     print("Usage:")
