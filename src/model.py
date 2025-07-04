@@ -3,6 +3,7 @@ import re
 import httpx
 import sys
 import time
+import argparse
 import os
 from pathlib import Path
 import pathlib
@@ -16,13 +17,9 @@ from pydantic import TypeAdapter
 import pandas as pd
 import requests
 import ollama
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  
 
-
-
-CONFIG_PATH = Path("src/configs/confis.json")    
-
-
+CONFIG_PATH = Path("src/configs/confis.json")  
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     txt = Path(path).read_text(encoding="utf-8")
     return TypeAdapter(AppConfig).validate_json(txt)
@@ -36,6 +33,8 @@ WEBUI_MODEL_NAME = cfg.webui_ollama.MODEL_NAME
 WEBUI_URL = cfg.webui_ollama.ollama_url.rstrip("/")
 RAW_DIR = Path("data")
 RAW_DIR.mkdir(exist_ok=True)
+TEMPERATURE = 0.3
+TIMEOUT = 180
 
 
 SYSTEM_PROMPT = (
@@ -110,72 +109,60 @@ def extract_json(text: str) -> dict:
         raise ValueError("JSON not found in model output")
     return json.loads(m.group(0))
 
-def webui_chat(
-    prompt: str,
-    model: str = WEBUI_MODEL_NAME,          
+def chat(prompt: str,          
     system_prompt: str | None = None,
-    json_schema: dict | None = None,  # передайте schema.model_json_schema() если нужен строгий JSON
-    temperature: float = 0.1,
-    timeout: float = 180.0,
-) -> str:
-    
-    headers = {"Content-Type": "application/json"}
-    if WEBUI_KEY:
-        headers["Authorization"] = f"Bearer {WEBUI_KEY}"
+    json_schema=None,
+    flag=1):
 
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
+    if flag == 0:
+        headers = {"Content-Type": "application/json"}
+        if WEBUI_KEY:
+            headers["Authorization"] = f"Bearer {WEBUI_KEY}"
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
-    payload = {
-        "model": model,
+        payload = {
+        "model": WEBUI_MODEL_NAME,
         "messages": messages,
         "stream": False,
-        "temperature": temperature,
+        "temperature": TEMPERATURE,
         "max_tokens": 1500,
-    }
-
-    # если хотим получить валидный JSON от модели – просим WebUI об этом
-    if json_schema is not None:
-        payload["response_format"] = {
-            "type": "json_object",
-            "schema": json_schema         
         }
 
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(f"{WEBUI_URL}/api/chat/completions",
+        if json_schema is not None:
+            payload["response_format"] = {
+                "type": "json_object"
+                }
+        
+        with httpx.Client(timeout=TIMEOUT) as client:
+            r = client.post(f"{WEBUI_URL}/api/chat/completions",
                         headers=headers, json=payload)
-        r.raise_for_status()
-        print(r)
-        return r.json()["choices"][0]["message"]["content"].strip()
-
-
-
-def _ollama_chat(model: str, prompt: str, schema_model, temperature: float = 0.1):
-    """
-    Отправляет prompt в Ollama и валидирует ответ с помощью schema_model (Pydantic).
-    Возвращает экземпляр schema_model.
-    """
-    response = ollama.chat(
-        model=model,
+            r.raise_for_status()
+            print(r)
+            return r.json()["choices"][0]["message"]["content"].strip()
+    else:
+        response = ollama.chat(
+        model=MODEL_NAME,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
         ],
         # главное: правильный параметр
-        format=schema_model.model_json_schema(),
-        options={"temperature": temperature},
-    )
-    # print(f'{response.message.content}')
-    time.sleep(0.35) 
-    return response.message.content
+        format=json_schema.model_json_schema(),
+        options={"temperature": TEMPERATURE},
+        )
+        time.sleep(0.35) 
+        return response.message.content
 
 def enrich_with_metadata(
     xlsx_path: Path,
     lines: int = 100,
     out_csv: Path = RAW_DIR / "enriched.csv",
     sleep_s: float = 0.2,
+    flag: int | None = 0
 ) -> Path:
     """
     1) Берёт первые `lines` строк Excel.
@@ -195,12 +182,10 @@ def enrich_with_metadata(
     for idx, row in df.iterrows():
         prompt = METADATA_PROMPT.format(text=row["raw_text"])
         try:
-            ans = _ollama_chat(MODEL_NAME, prompt, Clast)
-            meta = json.loads(ans)
-        except Exception:
-            meta = json.loads({"region": "", "start": "", "end": "", "resources": []})
-
-        # print(meta)
+            ans = chat(prompt=prompt, json_schema=Clast, flag=flag)
+            meta = extract_json(ans)
+        except Exception as e:
+            print("Parse error:", e) 
 
         df.at[idx, "region"]    = meta['region']
         df.at[idx, "start"]     = meta['start']
@@ -220,6 +205,7 @@ def risk_vector(
     top_n: int = 100,
     out_csv: Path = RAW_DIR / "risk_vector.csv",
     sleep_s: float = 0.2,
+    flag:int | None = 0,
 ) -> Path:
     """
     Генерирует CSV:
@@ -251,7 +237,7 @@ def risk_vector(
         prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
 
         try:
-            ans = _ollama_chat(MODEL_NAME, prompt, RiskResp)
+            ans = chat(MODEL_NAME, prompt, RiskResp, flag=flag)
             meta = json.loads(ans)
             risk = float(meta.get("risk", 0.0))
             reason = meta.get("reason", "")
@@ -282,6 +268,7 @@ def risk_matrix(
     top_n: int = 50,                 # для каждого A сколько кандидатов B
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     sleep_s: float = 0.25,
+    flag: int | None = None
 ) -> None:
     """Считает матрицу (target_count × top_n) рисков и сохраняет CSV + PNG."""
     df = pd.read_csv(enriched_csv)
@@ -311,12 +298,12 @@ def risk_matrix(
             prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
 
             try:
-                ans = webui_chat(prompt, model=WEBUI_MODEL_NAME, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp.model_json_schema())
+                ans = chat(prompt, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp, flag=flag)
+                print(ans)
                 meta  = extract_json(ans)
                 risk  = float(meta.get("risk", 0.0))
                 reason = meta.get("reason", "")
             except Exception as e:
-                risk, reason = None, "parse_error"
                 print("parse_error:", e)
 
             records.append(
@@ -338,28 +325,71 @@ def _usage() -> None:
     sys.exit(1)
 
 
+def _parse_cli() -> argparse.Namespace:
+    """Возвращает объект с полями .cmd, .webui, .excel, .lines …"""
+    p = argparse.ArgumentParser(prog="events_analyzer",
+                                description="CLI для build / risk / matrix")
+
+    # глобальный флаг – какой бэкенд использовать
+    p.add_argument("--webui",  action="store_true",
+                   help="использовать удалённый WebUI (по-умолчанию Ollama)")
+    p.add_argument("--ollama", action="store_true",
+                   help="форсировать локальный Ollama (переопределяет --webui)")
+
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # --- build ---
+    sb = sub.add_parser("build", help="собрать enriched.csv из Excel")
+    sb.add_argument("excel", type=Path, help="путь к .xlsx")
+    sb.add_argument("-l", "--lines", type=int, default=100,
+                    help="сколько строк читать (default: 100)")
+
+    # --- risk ---
+    sr = sub.add_parser("risk", help="вектор рисков 1×N")
+    sr.add_argument("enriched", type=Path, help="enriched.csv")
+    sr.add_argument("-t", "--target-id", type=int, default=0,
+                    help="event_id мероприятия A (default: 0)")
+    sr.add_argument("-n", "--top", type=int, default=100,
+                    help="сколько кандидатов B (default: 100)")
+
+    # --- matrix ---
+    sm = sub.add_parser("matrix", help="матрица рисков N×K")
+    sm.add_argument("enriched", type=Path, help="enriched.csv")
+    sm.add_argument("-c", "--count", type=int, default=10,
+                    help="сколько A-мероприятий (default: 10)")
+    sm.add_argument("-n", "--top",   type=int, default=50,
+                    help="сколько B-кандидатов на каждое A (default: 50)")
+
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        _usage()
+    args = _parse_cli()
 
-    cmd = sys.argv[1].lower()
+    # выбор бэкенда: 0 = WebUI, 1 = Ollama
+    flag = 1                             # по-умолчанию Ollama
+    if args.webui and not args.ollama:
+        flag = 0
 
-    if cmd == "build":
-        excel_path = Path(sys.argv[2])
-        n_lines = int(sys.argv[3]) if len(sys.argv) >= 4 else 100
-        enrich_with_metadata(excel_path, lines=n_lines)
+    if args.cmd == "build":
+        enrich_with_metadata(
+            xlsx_path=args.excel,
+            lines=args.lines,
+            flag=flag,
+        )
 
-    elif cmd == "risk":
-        enriched = Path(sys.argv[2])
-        tgt_id = int(sys.argv[3]) if len(sys.argv) >= 4 else 0
-        top_n_val = int(sys.argv[4]) if len(sys.argv) >= 5 else 100
-        risk_vector(enriched, target_id=tgt_id, top_n=top_n_val)
+    elif args.cmd == "risk":
+        risk_vector(
+            enriched_csv=args.enriched,
+            target_id=args.target_id,
+            top_n=args.top,
+            flag=flag,
+        )
 
-    elif cmd == "matrix":
-        enriched     = Path(sys.argv[2])
-        tgt_cnt      = int(sys.argv[3]) if len(sys.argv) >= 4 else 10
-        top_n_val    = int(sys.argv[4]) if len(sys.argv) >= 5 else 50
-        risk_matrix(enriched, target_count=tgt_cnt, top_n=top_n_val)
-
-    else:
-        _usage()
+    elif args.cmd == "matrix":
+        risk_matrix(
+            enriched_csv=args.enriched,
+            target_count=args.count,
+            top_n=args.top,
+            flag=flag,
+        )
