@@ -26,3 +26,5 @@ class RiskResp(BaseModel):
     risk: float
     reason: str
     
+class Description(BaseModel):
+    description: str

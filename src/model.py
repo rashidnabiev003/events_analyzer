@@ -7,17 +7,21 @@ import argparse
 import os
 from pathlib import Path
 import pathlib
-ROOT = pathlib.Path(__file__).resolve().parents[1]   # = C:\Repos\events_analyzer
+ROOT = pathlib.Path(__file__).resolve().parents[1]  
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from typing import Any, Dict, List
 from src.utils.data_loader import build_raw
-from src.schemas.main_schemas import AppConfig, Clast, RiskResp
+from src.schemas.main_schemas import (AppConfig,
+                                        Clast,
+                                        RiskResp,
+                                        Description)
 from pydantic import TypeAdapter
 import pandas as pd
 import requests
 import ollama
 import matplotlib.pyplot as plt  
+from tqdm import tqdm
 
 CONFIG_PATH = Path("src/configs/confis.json")  
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
@@ -38,9 +42,76 @@ TIMEOUT = 180
 
 
 SYSTEM_PROMPT = (
-    "Ты — ИИ-ассистент, который извлекает структурированные данные из описаний "
-    "проектных мероприятий. Отвечай всегда JSON-объектом!"
+    """Ты — ИИ-ассистент, эксперт по анализу рисков в проектах национальных мероприятий
+    проектных мероприятий. Отвечай всегда JSON-объектом!
+    Для оценки связи между мероприятиями ты дожен использовать следующий вариант размышления :
+
+    1. Оцените уровень влияния по трём аспектам и дайте каждой оценке дискретное значение от 0 до 4, где:  
+   - 0 = отсутствие влияния  
+   - 1 = незначительное  
+   - 2 = умеренное  
+   - 3 = значительное  
+   - 4 = критическое
+
+   Аспекты:  
+   - time_level — влияние на сроки  
+   - resource_level — влияние на ресурсы (финансовые, человеческие, материальные)   
+
+2. Вычислите общий риск как сумму 2 уровней:  
+total_risk = time_level + resource_level // диапазон 0–12
+
+3. Вычислите вероятность негативного исхода как отношение:  
+probability_failure = total_risk / 12.0 // число от 0.0 до 1.0
+
+4. Определите impact_type:  
+- "прямое", если хотя бы один из уровней = 4  
+- "косвенное", если все уровни < 4
+
+5. reason —  объяснение, отражающее общую связанность мероприятия.
+Пример для пункта 5:
+Исходное мероприятие:
+В рамках дорожной карты "Квантовые коммуникации" до 2030 года созданы квантовые сети, разработаны и сертифицированы высокотехнологичные продукты, а также запущено их опытно-промышленное производство и реализация технологическими компаниями.
+Наиболее связанное мероприятие:
+В рамках дорожной карты "Квантовые вычисления" разработаны прототипы квантовых процессоров с различным количеством кубитов на различных технологических платформах. Также созданы и реализованы квантовые алгоритмы для решения вычислительных задач с использованием этих процессоров.
+Объяснение зависимости:
+Для успешного создания и реализации квантовых сетей необходимо наличие функциональных квантовых процессоров и соответствующих алгоритмов. Квантовые процессоры являются ключевыми компонентами для обеспечения квантовых коммуникаций, поскольку они выполняют вычисления и обработку информации в квантовых сетях. Без наличия этих процессоров и алгоритмов невозможно полноценно разработать, протестировать и запустить квантовые сети.
+
+Формат вывода (только один JSON, без лишнего текста):
+
+    """
 )
+
+THINK_SYSTEM_PROMPT = (
+"""
+/ no_think
+Ты — аналитик проектных рисков.
+
+<task>
+Тебе дадут 3 русских описания:  (базовое мероприятие) и  (кандидат) и ответ от LLM модели.
+1. Определи, может ли сбой/задержка связном мероприятии негативно повлиять на исходное.
+2. Дай оценку влияния в 2 - 3 русских предложениях
+3. Если связь есть, объясни зависимость в 2-10 русских предложениях.
+4.ССОБЛЮДАЙ ШАБЛОН
+</task>
+
+Верни ответ СТРОГО в таком шаблоне (без Markdown):
+
+Исходное мероприятие: {text}
+
+Наиболее связанное мероприятие: {text}
+
+Объяснение зависимости: {dependency}
+
+<think>
+# Размышляй здесь пошагово.
+</think>
+
+<solution>
+# Заполни шаблон выше.
+</solution>
+"""
+)
+
 
 METADATA_PROMPT = """
 Извлеки JSON с полями:
@@ -54,43 +125,35 @@ resources – список ключевых ресурсов или подряд
 """
 
 RISK_PROMPT = """
-Ты — эксперт по Program & Portfolio Management и риск-менеджменту (PMBOK, AHP, FMEA).
-Оцени взаимную зависимость мероприятий «A» и «B» и выставь им числовой риск Risk_new ∈ [0, 1],
-чтобы оценки отражали реальную приоритизацию.
+Ты — эксперт по анализу рисков в проектах национальных мероприятий. Перед тобой пара событий:
 
-Шкала баллов
-Диапазон Risk_new	Толкование
-0.80 – 1.00	Максимальный риск: без B мероприятие A не может стартовать/завершиться (stop-factor).
-0.60 – 0.79	Высокий: задержка B почти гарантированно сдвинет сроки A.
-0.30 – 0.59	Средний: B влияет на качество или масштаб A, но обходной путь реалистичен.
-0.10 – 0.29	Низкий: связь косвенная; последствия главным образом репутация/бюджет.
-0	Зависимости нет.
+- Мероприятие A: {a_text}  
+- Мероприятие B: {b_text}
 
-Используй формулу
-Risk_new = Impact × Probability
-где Impact ∈ [0,1] — сила влияния B на A,
-а Probability ∈ [0,1] — шанс, что B реально задержит/сорвёт A.
+json
+{{"risk": <probability_failure>, "reason": "<строка>"}}
+Начинайте сразу после этого сообщения.
+"""
 
-Как определять Impact
-Impact	Критерий
-1,0 – 0,8	Без B нельзя пройти обязательную сертификацию / ввести в эксплуатацию («жёсткий ворот»).
-0,7 – 0,5	Сильно бьёт по сроку/бюджету/охвату, но MVP A возможен.
-0,4 – 0,2	Улучшает качество, безопасность, эффективность, но не критичен.
-< 0,2	Почти косметика; влияние несущественно.
+THINK_PROMPT = """
+Вот 2 мероприятия их описания и названия. Тебе нужно объяснить связность этих мероприятий. Рассуждай логически, точно и цельно.
 
-Как определять Probability
-Probability	Типовой сценарий
-0,8 – 1,0	B крупное, регуляторное, часто буксует.
-0,6 – 0,5	B средней сложности; заметные кадровые/финансовые риски.
-0,4 – 0,2	B типовое, тиражируемое; обычно выполняется в срок.
-< 0,2	B уже выполнено или почти завершено.
-При неопределённости — коротко обоснуй выбранное число.
-Пиши по-русски, ясно и структурно.
-Округляй числа до сотых (0,12; 0,25).
 
-Текст мероприятия  A : {a_text}
-Текст мероприятия B: {b_text}
+Название исходного мероприятия : {a_name}
+Описание исходного мероприятия : {a_text}
 
+Название связного мероприятия : {b_name}
+Описание связного мероприятия : {b_text} 
+
+Числовой риск связного мероприятия для исходного мероприятия : {risk} 
+json
+{{"reason": "
+Исходное мероприятие: <text>
+
+Наиболее связанное мероприятие: <text>
+
+Объяснение зависимости: <dependency>"}}
+Начинайте сразу после этого сообщения.
 """
 
 
@@ -110,7 +173,7 @@ def extract_json(text: str) -> dict:
     return json.loads(m.group(0))
 
 def chat(prompt: str,          
-    system_prompt: str | None = None,
+    system_prompt: str | None = SYSTEM_PROMPT,
     json_schema=None,
     flag=1):
 
@@ -141,13 +204,12 @@ def chat(prompt: str,
             r = client.post(f"{WEBUI_URL}/api/chat/completions",
                         headers=headers, json=payload)
             r.raise_for_status()
-            print(r)
             return r.json()["choices"][0]["message"]["content"].strip()
     else:
         response = ollama.chat(
         model=MODEL_NAME,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user",   "content": prompt},
         ],
         # главное: правильный параметр
@@ -161,7 +223,7 @@ def enrich_with_metadata(
     xlsx_path: Path,
     lines: int = 100,
     out_csv: Path = RAW_DIR / "enriched.csv",
-    sleep_s: float = 0.2,
+    sleep_s: float = 0.350,
     flag: int | None = 0
 ) -> Path:
     """
@@ -179,7 +241,10 @@ def enrich_with_metadata(
         df[col] = ""
 
     # 1-b. спрашиваем Ollama по каждой строке
-    for idx, row in df.iterrows():
+    for idx, row in tqdm(df.iterrows(), 
+                        total=len(df),
+                        desc="metadata",
+                        leave=False):
         prompt = METADATA_PROMPT.format(text=row["raw_text"])
         try:
             ans = chat(prompt=prompt, json_schema=Clast, flag=flag)
@@ -190,8 +255,7 @@ def enrich_with_metadata(
         df.at[idx, "region"]    = meta['region']
         df.at[idx, "start"]     = meta['start']
         df.at[idx, "end"]       = meta['end']
-        df.at[idx, "resources"] = ";".join(meta['resources']) 
-        print(f"[meta] {idx+1}/{len(df)} ✓")
+        df.at[idx, "resources"] = ";".join(meta['resources'])
         time.sleep(sleep_s)
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +268,7 @@ def risk_vector(
     target_id: int = 0,
     top_n: int = 100,
     out_csv: Path = RAW_DIR / "risk_vector.csv",
-    sleep_s: float = 0.2,
+    sleep_s: float = 0.350,
     flag:int | None = 0,
 ) -> Path:
     """
@@ -277,7 +341,10 @@ def risk_matrix(
     targets = df.head(target_count)
 
     records: List[Dict[str, Any]] = []
-    for _, row_a in targets.iterrows():
+    for _, row_a in tqdm(targets.iterrows(),
+                         total=len(targets),
+                         leave=False,
+                         desc="matrix"):
         a_id   = int(row_a.event_id)
         a_text = (
             f"Текст: {row_a.raw_text}\n"
@@ -288,7 +355,10 @@ def risk_matrix(
         # кандидаты B: первые top_n, кроме самого A
         cand_df = df[df.event_id != a_id].head(top_n)
 
-        for _, row_b in cand_df.iterrows():
+        for _, row_b in tqdm(cand_df.iterrows(),
+                             total=len(cand_df),
+                             desc=f"A = {a_id}",
+                             leave=False):
             b_id = int(row_b.event_id)
             b_text = (
                 f"Текст: {row_b.raw_text}\n"
@@ -299,7 +369,6 @@ def risk_matrix(
 
             try:
                 ans = chat(prompt, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp, flag=flag)
-                print(ans)
                 meta  = extract_json(ans)
                 risk  = float(meta.get("risk", 0.0))
                 reason = meta.get("reason", "")
@@ -309,7 +378,6 @@ def risk_matrix(
             records.append(
                 {"A_id": a_id, "B_id": b_id, "risk": risk, "reason": reason}
             )
-            print(f"[matrix] A={a_id} → B={b_id}  risk={risk:.2f}")
             time.sleep(sleep_s)
 
     # 1) CSV
@@ -318,11 +386,55 @@ def risk_matrix(
     mat_df.to_csv(out_csv, index=False, encoding="utf-8")
     print(f"✔ risk matrix CSV → {out_csv}")
 
-def _usage() -> None:
-    print("Usage:")
-    print("  python src/model.py build <excel_path> [lines]")
-    print("  python src/model.py risk  <enriched.csv> [target_id] [top_n]")
-    sys.exit(1)
+
+def explainer(xlsx_path:Path,
+              sleep_s: float = 0.25,
+              flag:int | None = None,
+              out_csv: Path | None = None,
+              sheet_name:str | None = "Лист1"):
+    
+    df = pd.read_excel(
+        xlsx_path,
+        header=None,          
+        engine="openpyxl",
+        sheet_name=sheet_name,
+    )
+    
+    records : List[Dict[str, Any]] = []
+    column_idx = (1, 2, 4 , 5, 6)
+    names = ("Наименование B", "Описание B", "Наименование А", "Описание А", "Риск")
+
+    sub = df.loc[1:, column_idx].copy()
+    sub.columns = names
+
+    for _, raw in  tqdm(sub.iterrows(),
+                  total=len(sub),
+                  leave=False):
+        b_name = raw["Наименование B"]
+        b_text = raw["Описание B"]
+        a_name = raw["Наименование А"]
+        a_text = raw["Описание А"]
+        risk = raw["Риск"]
+
+        prompt =    THINK_PROMPT.format(a_text=a_text, b_text=b_text, a_name=a_name, b_name=b_name, risk=risk)
+        try:
+            ans = chat(prompt, system_prompt=THINK_SYSTEM_PROMPT,json_schema=Description, flag=flag)
+            meta  = extract_json(ans)
+            reason = meta.get("description", "")
+        except Exception as e:
+            print("parse_error:", e)
+
+        time.sleep(sleep_s)
+        records.append(reason)
+    
+    if out_csv is None:
+        out_csv = Path("data/explained.csv")
+    mat_df = pd.DataFrame(records)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    mat_df.to_csv(out_csv, index=False, encoding="utf-8")
+    print(f"✔ explanation CSV → {out_csv}")
+
+
 
 
 def _parse_cli() -> argparse.Namespace:
@@ -360,6 +472,13 @@ def _parse_cli() -> argparse.Namespace:
     sm.add_argument("-n", "--top",   type=int, default=50,
                     help="сколько B-кандидатов на каждое A (default: 50)")
 
+    se = sub.add_parser("explain", help="генерирует текстовое объяснение зависимости A←B")
+    se.add_argument("excel", type=Path, help="xlsx с колонками (B_name,B_desc,A_name,A_desc, risk)")
+    se.add_argument("--sheet", default="Лист1", help="имя листа Excel (default: Лист1)")
+    se.add_argument("--out",   type=Path, default="data/explained.csv",
+                   help="путь вывода CSV (default: data/explained.csv)")
+    se.add_argument("--sleep", type=float, default=0.25, help="пауза между вызовами (сек)")
+
     return p.parse_args()
 
 
@@ -374,7 +493,7 @@ if __name__ == "__main__":
     if args.cmd == "build":
         enrich_with_metadata(
             xlsx_path=args.excel,
-            lines=args.lines,
+            lines=args.lines + 1,
             flag=flag,
         )
 
@@ -391,5 +510,13 @@ if __name__ == "__main__":
             enriched_csv=args.enriched,
             target_count=args.count,
             top_n=args.top,
+            flag=flag,
+        )
+    elif args.cmd == "explain":
+        explainer(
+            xlsx_path=args.excel,
+            sheet_name=args.sheet,
+            out_csv=args.out,
+            sleep_s=args.sleep,
             flag=flag,
         )
