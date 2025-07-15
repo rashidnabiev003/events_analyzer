@@ -1,0 +1,7 @@
+[project]
+name = "events_analyzer"
+version = "0.1.0"
+authors = [
+    { name = "Rashid Nabiev", email = "your_email@example.com" }
+]
+dependencies = []
