@@ -1,6 +1,7 @@
 import json
 import re
 import httpx
+import csv  
 import sys
 import time
 import argparse
@@ -228,55 +229,53 @@ def risk_matrix(
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
-    candidates = df.iloc[second_col_l:second_col_u]
-
 
     records: List[Dict[str, Any]] = []
-    for _, row_a in tqdm(targets.iterrows(),
-                         total=len(targets),
-                         leave=False,
-                         desc="matrix"):
-        a_id   = int(row_a.event_id)
-        a_text = (
-            f"Текст: {row_a.raw_text}\n"
-            f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
-            f"Ресурсы: {row_a.resources}"
-        )
 
-        # кандидаты B: первые top_n, кроме самого A
-        candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]  
-
-        for _, row_b in tqdm(candidates.iterrows(),
-                             total=len(candidates),
-                             desc=f"A = {a_id}",
-                             leave=False):
-            b_id = int(row_b.event_id)
-            b_text = (
-                f"Текст: {row_b.raw_text}\n"
-                f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
-                f"Ресурсы: {row_b.resources}"
-            )
-            prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
-
-            try:
-                ans = chat(prompt, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp, flag=flag)
-                meta  = extract_json(ans)
-                risk  = float(meta.get("risk", 0.0))
-                reason = meta.get("reason", "")
-            except Exception as e:
-                print("parse_error:", e)
-
-            records.append(
-                {"A_id": a_id, "B_id": b_id, "risk": risk, "reason": reason}
-            )
-            time.sleep(sleep_s)
-
-    # 1) CSV
-    mat_df = pd.DataFrame(records)
     out_csv.parent.mkdir(exist_ok=True, parents=True)
-    mat_df.to_csv(out_csv, index=False, encoding="utf-8")
-    print(f"✔ risk matrix CSV → {out_csv}")
+    with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:
+        fieldnames = ["A_id", "B_id", "risk", "reason"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
 
+        for _, row_a in tqdm(targets.iterrows(),
+                            total=len(targets),
+                            leave=False,
+                            desc="matrix"):
+            a_id   = int(row_a.event_id)
+            a_text = (
+                f"Текст: {row_a.raw_text}\n"
+                f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
+                f"Ресурсы: {row_a.resources}"
+            )
+
+            # кандидаты B: первые top_n, кроме самого A
+            candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]  
+
+            for _, row_b in candidates.iterrows():
+                b_id = int(row_b.event_id)
+                b_text = (
+                    f"Текст: {row_b.raw_text}\n"
+                    f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
+                    f"Ресурсы: {row_b.resources}"
+                )
+                prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
+
+                try:
+                    ans = chat(prompt, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp, flag=flag)
+                    meta  = extract_json(ans)
+                    risk  = float(meta.get("risk", 0.0))
+                    reason = meta.get("reason", "")
+                except Exception as e:
+                    print("parse_error:", e)
+
+                record = {"A_id": a_id, "B_id": b_id, "risk": risk, "reason": reason}
+                records.append(record)
+                writer.writerow(record)
+                csvfile.flush()  # Сохраняем итоговую запись сразу
+                time.sleep(sleep_s)
+            
+    print(f"✔ risk matrix → {out_csv}")
 
 
 def _parse_cli() -> argparse.Namespace:
