@@ -95,19 +95,17 @@ resources – список ключевых ресурсов или подряд
 """
 
 RISK_PROMPT = """
+/ no_think
 Вот 2 мероприятия их описания и названия. Тебе нужно объяснить связность этих мероприятий. Рассуждай логически, точно и цельно.
 - Исходное мероприятие : {a_text}  
 - Связное мероприятие : {b_text}
 
 json
+**Формат ответа (строго JSON):**
 {{
-"risk":"probability_failure"
-"reason": "
-Исходное мероприятие: <text>
-
-Наиболее связанное мероприятие: <text>
-
-Объяснение зависимости: <dependency>"}}
+  "risk": probability_failure,
+  "reason": "Исходное мероприятие: ...\nНаиболее связанное мероприятие: ...\nОбъяснение зависимости: ..."
+}}
 Начинайте сразу после этого сообщения.
 """
 
@@ -202,7 +200,7 @@ def enrich_with_metadata(
                         leave=False):
         prompt = METADATA_PROMPT.format(text=row["raw_text"])
         try:
-            ans = chat(prompt=prompt, json_schema=Clast, flag=flag)
+            ans = chat(prompt=prompt, system_prompt=SYSTEM_METADATA_PROMPT, json_schema=Clast, flag=flag)
             meta = extract_json(ans)
         except Exception as e:
             print("Parse error:", e) 
@@ -218,82 +216,20 @@ def enrich_with_metadata(
     print(f"✔ enriched CSV → {out_csv}")
     return out_csv
 
-def risk_vector(
-    enriched_csv: Path,
-    target_id: int = 0,
-    top_n: int = 100,
-    out_csv: Path = RAW_DIR / "risk_vector.csv",
-    sleep_s: float = 0.350,
-    flag:int | None = 0,
-) -> Path:
-    """
-    Генерирует CSV:
-        target_id, candidate_id, risk, reason
-    """
-    df = pd.read_csv(enriched_csv)
-
-    if target_id not in df["event_id"].values:
-        raise ValueError(f"event_id={target_id} не найден в {enriched_csv}")
-
-    # Формируем A-текст (включая метаданные)
-    row_a = df[df.event_id == target_id].iloc[0]
-    a_text = (
-        f"Текст: {row_a.raw_text}\n"
-        f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
-        f"Ресурсы: {row_a.resources}"
-    )
-
-    # Кандидаты: все, кроме A, возьмём top_n
-    cand_df = df[df.event_id != target_id].head(top_n)
-    records: List[Dict[str, Any]] = []
-
-    for i, row_b in cand_df.iterrows():
-        b_text = (
-            f"Текст: {row_b.raw_text}\n"
-            f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
-            f"Ресурсы: {row_b.resources}"
-        )
-        prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
-
-        try:
-            ans = chat(MODEL_NAME, prompt, RiskResp, flag=flag)
-            meta = json.loads(ans)
-            risk = float(meta.get("risk", 0.0))
-            reason = meta.get("reason", "")
-        except Exception:
-            risk, reason = 0.0, "parse_error"
-
-        records.append(
-            {
-                "target_id": target_id,
-                "candidate_id": int(row_b.event_id),
-                "risk": risk,
-                "reason": reason,
-            }
-        )
-        print(f"[risk] {len(records)}/{top_n}  risk={risk:.2f}")
-        time.sleep(sleep_s)
-
-    out_df = pd.DataFrame(records)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_csv(out_csv, index=False, encoding="utf-8")
-    print(f"✔ risk vector CSV → {out_csv}")
-    return out_csv
-
-
 def risk_matrix(
     enriched_csv: Path,
-    target_count: int = 10,          # сколько A-мероприятий взять (0 … target_count-1)
-    top_n: int = 50,                 # для каждого A сколько кандидатов B
+    first_col_l: int = 0 ,
+    first_col_u: int = 10,
+    second_col_l: int = 0,
+    second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     sleep_s: float = 0.25,
     flag: int | None = None
 ) -> None:
-    """Считает матрицу (target_count × top_n) рисков и сохраняет CSV + PNG."""
     df = pd.read_csv(enriched_csv)
+    targets = df.iloc[first_col_l:first_col_u]
+    candidates = df.iloc[second_col_l:second_col_u]
 
-    # ограничиваем список целей A
-    targets = df.head(target_count)
 
     records: List[Dict[str, Any]] = []
     for _, row_a in tqdm(targets.iterrows(),
@@ -308,10 +244,10 @@ def risk_matrix(
         )
 
         # кандидаты B: первые top_n, кроме самого A
-        cand_df = df[df.event_id != a_id].head(top_n)
+        candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]  
 
-        for _, row_b in tqdm(cand_df.iterrows(),
-                             total=len(cand_df),
+        for _, row_b in tqdm(candidates.iterrows(),
+                             total=len(candidates),
                              desc=f"A = {a_id}",
                              leave=False):
             b_id = int(row_b.event_id)
@@ -342,55 +278,6 @@ def risk_matrix(
     print(f"✔ risk matrix CSV → {out_csv}")
 
 
-def explainer(xlsx_path:Path,
-              sleep_s: float = 0.25,
-              flag:int | None = None,
-              out_csv: Path | None = None,
-              sheet_name:str | None = "Лист1"):
-    
-    df = pd.read_excel(
-        xlsx_path,
-        header=None,          
-        engine="openpyxl",
-        sheet_name=sheet_name,
-    )
-    
-    records : List[Dict[str, Any]] = []
-    column_idx = (1, 2, 4 , 5, 6)
-    names = ("Наименование B", "Описание B", "Наименование А", "Описание А", "Риск")
-
-    sub = df.loc[1:, column_idx].copy()
-    sub.columns = names
-
-    for _, raw in  tqdm(sub.iterrows(),
-                  total=len(sub),
-                  leave=False):
-        b_name = raw["Наименование B"]
-        b_text = raw["Описание B"]
-        a_name = raw["Наименование А"]
-        a_text = raw["Описание А"]
-        risk = raw["Риск"]
-
-        prompt =    THINK_PROMPT.format(a_text=a_text, b_text=b_text, a_name=a_name, b_name=b_name, risk=risk)
-        try:
-            ans = chat(prompt, system_prompt=THINK_SYSTEM_PROMPT,json_schema=Description, flag=flag)
-            meta  = extract_json(ans)
-            reason = meta.get("description", "")
-        except Exception as e:
-            print("parse_error:", e)
-
-        time.sleep(sleep_s)
-        records.append(reason)
-    
-    if out_csv is None:
-        out_csv = Path("data/explained.csv")
-    mat_df = pd.DataFrame(records)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    mat_df.to_csv(out_csv, index=False, encoding="utf-8")
-    print(f"✔ explanation CSV → {out_csv}")
-
-
-
 
 def _parse_cli() -> argparse.Namespace:
     """Возвращает объект с полями .cmd, .webui, .excel, .lines …"""
@@ -411,28 +298,19 @@ def _parse_cli() -> argparse.Namespace:
     sb.add_argument("-l", "--lines", type=int, default=100,
                     help="сколько строк читать (default: 100)")
 
-    # --- risk ---
-    sr = sub.add_parser("risk", help="вектор рисков 1×N")
-    sr.add_argument("enriched", type=Path, help="enriched.csv")
-    sr.add_argument("-t", "--target-id", type=int, default=0,
-                    help="event_id мероприятия A (default: 0)")
-    sr.add_argument("-n", "--top", type=int, default=100,
-                    help="сколько кандидатов B (default: 100)")
-
     # --- matrix ---
     sm = sub.add_parser("matrix", help="матрица рисков N×K")
     sm.add_argument("enriched", type=Path, help="enriched.csv")
-    sm.add_argument("-c", "--count", type=int, default=10,
-                    help="сколько A-мероприятий (default: 10)")
-    sm.add_argument("-n", "--top",   type=int, default=50,
-                    help="сколько B-кандидатов на каждое A (default: 50)")
-
-    se = sub.add_parser("explain", help="генерирует текстовое объяснение зависимости A←B")
-    se.add_argument("excel", type=Path, help="xlsx с колонками (B_name,B_desc,A_name,A_desc, risk)")
-    se.add_argument("--sheet", default="Лист1", help="имя листа Excel (default: Лист1)")
-    se.add_argument("--out",   type=Path, default="data/explained.csv",
-                   help="путь вывода CSV (default: data/explained.csv)")
-    se.add_argument("--sleep", type=float, default=0.25, help="пауза между вызовами (сек)")
+    sm.add_argument("-tl", "--first_low", type=int, default=0,
+                    help="Нижний порог для первой колонки (default: 0)")
+    sm.add_argument("-tu", "--firts_top", type=int, default=10,
+                    help="Верхний порог для первой колонки (default: 10)")
+    sm.add_argument("-nl", "--second_low",   type=int, default=0,
+                    help="Нижний порог для второй колонки (default: 0)")
+    sm.add_argument("-nu", "--second_top",   type=int, default=50,
+                    help="Верхний порог для второй колонки (default: 50)")
+    sm.add_argument("-o", "--out", type=Path, default=RAW_DIR / "risk_matrix.csv",
+                    help="путь к выходному файлу (default: data/risk_matrix.csv)")
 
     return p.parse_args()
 
@@ -452,26 +330,13 @@ if __name__ == "__main__":
             flag=flag,
         )
 
-    elif args.cmd == "risk":
-        risk_vector(
-            enriched_csv=args.enriched,
-            target_id=args.target_id,
-            top_n=args.top,
-            flag=flag,
-        )
-
     elif args.cmd == "matrix":
         risk_matrix(
             enriched_csv=args.enriched,
-            target_count=args.count,
-            top_n=args.top,
-            flag=flag,
-        )
-    elif args.cmd == "explain":
-        explainer(
-            xlsx_path=args.excel,
-            sheet_name=args.sheet,
+            first_col_l=args.first_low,
+            first_col_u=args.firts_top,
+            second_col_l=args.second_low,
+            second_col_u=args.second_top,
             out_csv=args.out,
-            sleep_s=args.sleep,
             flag=flag,
         )
