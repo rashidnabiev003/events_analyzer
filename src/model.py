@@ -231,7 +231,7 @@ def risk_matrix(
     targets = df.iloc[first_col_l:first_col_u]
 
     records: List[Dict[str, Any]] = []
-
+    # создаём выходной CSV
     out_csv.parent.mkdir(exist_ok=True, parents=True)
     with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:
         fieldnames = ["A_id", "B_id", "risk", "reason"]
@@ -249,7 +249,9 @@ def risk_matrix(
                 f"Ресурсы: {row_a.resources}"
             )
 
-            # кандидаты B: первые top_n, кроме самого A
+            # выбираем кандидатов из второй колонки
+            # исключаем A_id, чтобы не сравнивать с самим собой
+            # и берём только те, что в пределах [second_col_l, second_col_u)
             candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]  
 
             for _, row_b in candidates.iterrows():
