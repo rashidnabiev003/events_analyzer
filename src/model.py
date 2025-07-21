@@ -1,7 +1,7 @@
 import json
 import re
-import httpx
-import csv  
+import csv
+import asyncio  
 import sys
 import time
 import argparse
@@ -12,33 +12,22 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from typing import Any, Dict, List
+from src.vllm_engine import VLLMEngine
 from src.utils.data_loader import build_raw
 from src.schemas.main_schemas import (AppConfig,
                                         Clast,
                                         RiskResp,
-                                        Description)
+                                        Description,
+                                        ChatItem)
 from pydantic import TypeAdapter
 import pandas as pd
 import requests
-import ollama
 from tqdm import tqdm
 
 CONFIG_PATH = CONFIG_PATH = ROOT / "src" / "configs" / "config.json" 
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     txt = Path(path).read_text(encoding="utf-8")
     return TypeAdapter(AppConfig).validate_json(txt)
-
-
-cfg = load_config()
-WEBUI_KEY = os.getenv("WEBUI_API_KEY", "")
-OLLAMA_URL = cfg.ollama.ollama_url.rstrip("/")        
-MODEL_NAME = cfg.ollama.MODEL_NAME 
-WEBUI_MODEL_NAME = cfg.webui_ollama.MODEL_NAME      
-WEBUI_URL = cfg.webui_ollama.ollama_url.rstrip("/")
-RAW_DIR = Path("data")
-RAW_DIR.mkdir(exist_ok=True)
-TEMPERATURE = 0.3
-TIMEOUT = 180
 
 
 SYSTEM_PROMPT = (
@@ -111,6 +100,13 @@ json
 """
 
 
+cfg = load_config()        
+engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_PROMPT) 
+RAW_DIR = Path("data")
+RAW_DIR.mkdir(exist_ok=True)
+
+
+
 json_re = re.compile(r"\{[\s\S]*\}")
 
 def extract_json(text: str) -> dict:
@@ -125,53 +121,6 @@ def extract_json(text: str) -> dict:
     if not m:
         raise ValueError("JSON not found in model output")
     return json.loads(m.group(0))
-
-def chat(prompt: str,          
-    system_prompt: str | None = SYSTEM_PROMPT,
-    json_schema=None,
-    flag=1):
-
-    if flag == 0:
-        headers = {"Content-Type": "application/json"}
-        if WEBUI_KEY:
-            headers["Authorization"] = f"Bearer {WEBUI_KEY}"
-        
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-        "model": WEBUI_MODEL_NAME,
-        "messages": messages,
-        "stream": False,
-        "temperature": TEMPERATURE,
-        "max_tokens": 1500,
-        }
-
-        if json_schema is not None:
-            payload["response_format"] = {
-                "type": "json_object"
-                }
-        
-        with httpx.Client(timeout=TIMEOUT) as client:
-            r = client.post(f"{WEBUI_URL}/api/chat/completions",
-                        headers=headers, json=payload)
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
-    else:
-        response = ollama.chat(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": prompt},
-        ],
-        # главное: правильный параметр
-        format=json_schema.model_json_schema(),
-        options={"temperature": TEMPERATURE},
-        )
-        time.sleep(0.35) 
-        return response.message.content
 
 def enrich_with_metadata(
     xlsx_path: Path,
@@ -218,7 +167,7 @@ def enrich_with_metadata(
     return out_csv
 
 def risk_matrix(
-    enriched_csv: Path,
+    enriched_csv: Path = RAW_DIR / "enriched.csv",
     first_col_l: int = 0 ,
     first_col_u: int = 10,
     second_col_l: int = 0,
@@ -252,7 +201,8 @@ def risk_matrix(
             # выбираем кандидатов из второй колонки
             # исключаем A_id, чтобы не сравнивать с самим собой
             # и берём только те, что в пределах [second_col_l, second_col_u)
-            candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]  
+            candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]
+            prompts = []
 
             for _, row_b in candidates.iterrows():
                 b_id = int(row_b.event_id)
@@ -262,19 +212,20 @@ def risk_matrix(
                     f"Ресурсы: {row_b.resources}"
                 )
                 prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
+                prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
 
-                try:
-                    ans = chat(prompt, system_prompt=SYSTEM_PROMPT,json_schema=RiskResp, flag=flag)
-                    meta  = extract_json(ans)
-                    risk  = float(meta.get("risk", 0.0))
-                    reason = meta.get("reason", "")
-                except Exception as e:
-                    print("parse_error:", e)
+            responses = engine.chat_batch(prompts, json_schema=RiskResp)
 
-                record = {"A_id": a_id, "B_id": b_id, "risk": risk, "reason": reason}
+            for idx, (prompt, response) in enumerate(zip(prompts, responses)):
+                record = {
+                    "A_id": a_id,
+                    "B_id": candidates.iloc[idx].event_id,
+                    "risk": float(response.get("risk", 0.0)),
+                    "reason": response.get("reason", "")
+                }
                 records.append(record)
                 writer.writerow(record)
-                csvfile.flush()  # Сохраняем итоговую запись сразу
+                csvfile.flush()
                 time.sleep(sleep_s)
             
     print(f"✔ risk matrix → {out_csv}")
@@ -319,16 +270,10 @@ def _parse_cli() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_cli()
 
-    # выбор бэкенда: 0 = WebUI, 1 = Ollama
-    flag = 1                             # по-умолчанию Ollama
-    if args.webui and not args.ollama:
-        flag = 0
-
     if args.cmd == "build":
         enrich_with_metadata(
             xlsx_path=args.excel,
             lines=args.lines + 1,
-            flag=flag,
         )
 
     elif args.cmd == "matrix":
@@ -339,5 +284,4 @@ if __name__ == "__main__":
             second_col_l=args.second_low,
             second_col_u=args.second_top,
             out_csv=args.out,
-            flag=flag,
         )
