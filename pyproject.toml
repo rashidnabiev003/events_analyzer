@@ -1,23 +1,114 @@
 [project]
-name = "events_analyzer"
-version = "0.1.0"
-description = "Система анализа событий"
+name = "events-analyzer"
+version = "1.0.0"
+description = "Анализ и кластеризация мероприятий с использованием ИИ"
 authors = [
-    { name = "Rashid Nabiev", email = "none@example.com" }
+    { name = "Набиев Рашидхон", email = "rashidnabiev003@example.com" },
+    { name = "SEC MIREA Dev team", email = "team@edu.mirea.ru" },
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = "==3.12.*"
 dependencies = [
-    # Укажи, если есть зависимости, например:
-    # "pandas", "numpy", "matplotlib"
+    "hdbscan>=0.8.40",
+    "matplotlib>=3.10.3",
+    "numpy<2",
+    "openpyxl>=3.1.5",
+    "pandas==2.2.3",
+    "pydantic>=2.11.7",
+    "python-dotenv>=1.1.1",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.4",
+    "scikit-learn>=1.7.0",
+    "sentence-transformers>=5.0.0",
+    "torch==2.7.0",
+    "torchaudio>=2.7.0",
+    "torchvision>=0.22.0",
+    "tqdm>=4.67.1",
+    "transformers>=4.53.1",
+    "vllm>=0.9",
+]
+
+[dependency-groups]
+dev = [
+    "sphinx>=8.2.3",
+    "sphinx-autoapi>=3.6.0",
+    "ruff>=0.11.13",
+    "wemake-python-styleguide>=1.1.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.1",
 ]
 
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.ruff]
+line-length = 79
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",   # pycodestyle + pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "A",   # flake8-builtins
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RET", # flake8-return
+    "ARG", # flake8-unused-arguments
+    "PL",  # pylint
+    "RUF", # ruff-specific
+    "S",   # bandit (security)
+]
+
+ignore = [
+    "W191",    # indentation contains tabs
+    "E501",    # line too long (handled by formatter)
+    "S101",    # assert usage (ok in tests)
+    "PLR0913", # too many arguments
+    "PLR0915", # too many statements
+    "PLR2004", # magic values
+    "S311",    # pseudorandom generators (ok for demo data)
+    "UP032",   # use f-string
+    "S104",    # hardcoded bind
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "ARG001", "PLR2004"]
+"*/__init__.py" = ["F401"]
+"docs/source/conf.py" = ["ALL"]
+"src/model.py" = [
+    "B008",
+    "RUF006",
+    "ARG001",
+    "S104",
+] # CLI args, background tasks
+"src/schemas.py" = ["ARG002"] # Pydantic serializable_dict kwargs
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-statements = 40
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "tab"
+docstring-code-format = true
+
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu128"

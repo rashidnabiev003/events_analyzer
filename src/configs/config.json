@@ -1,13 +1,12 @@
 {
-    "ollama" : {
-    "MODEL_NAME":"qwen3:32b",
-    "ollama_version":"0.7.0",
-    "ollama_url":"http://localhost:11434"
-    },
-    "webui_ollama" : {
-    "MODEL_NAME":"qwen3:32b",
-    "ollama_version":"0.7.0",
-    "ollama_url":"https://webui.g-309.ru"
-    }
     
+    "vllm_engine_config" : {
+    "model_path":"/home/rashid/models/Qwen3-8B/",
+    "gpu_memory_utilization":0.7,
+    "trust_remote_code":true,
+    "quantization":"fp8",
+    "tensor_parallel_size":2,
+    "max_model_length":2048
+    }
+
 }
