@@ -26,12 +26,12 @@ class VLLMEngine:
                                tensor_parallel_size=engine_config.tensor_parallel_size
                                )
         self.system_prompt = system_prompt 
-        self.bath_size = engine_config.max_batch_size
+        self.batch_size = engine_config.max_batch_size
 
     def chat_batch(self, items: Optional[Sequence[ChatItem]] = None,
                    sampling_params: Dict[str, Any] = None,
                    json_schema: Any = None,
-                   max_retries: int = 2) -> List[Dict[str, Any]]:
+                   max_retries: int = 1) -> List[Dict[str, Any]]:
         if sampling_params is None:
             sampling_params = SamplingParams(
                 temperature=0.3,
