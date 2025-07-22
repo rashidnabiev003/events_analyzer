@@ -170,58 +170,58 @@ def risk_matrix(
     second_col_l: int = 0,
     second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
-    global_batch_size: int = 100
+    global_batch_size: int = 1000
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
 
-    records: List[Dict[str, Any]] = []
-    # создаём выходной CSV
+    # Собираем все пары A и B
+    all_prompts = []
+    all_pairs = []
+
+    for _, row_a in tqdm(targets.iterrows(), total=len(targets), desc="Collecting pairs"):
+        a_id = int(row_a.event_id)
+        a_text = (
+            f"Текст: {row_a.raw_text}\n"
+            f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
+            f"Ресурсы: {row_a.resources}"
+        )
+
+        # Кандидаты B (исключая A_id)
+        candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]
+
+        for _, row_b in candidates.iterrows():
+            b_id = int(row_b.event_id)
+            b_text = (
+                f"Текст: {row_b.raw_text}\n"
+                f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
+                f"Ресурсы: {row_b.resources}"
+            )
+            prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
+            all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
+            all_pairs.append((a_id, b_id))  # ← Сохраняем пары A_id и B_id
+    
+    responses = []
+    for i in range(0, len(all_prompts), cfg.vllm_engine_config.max_batch_size):
+        batch = all_prompts[i:i + cfg.vllm_engine_config.max_batch_size]
+        batch_responses = engine.chat_batch(batch, json_schema=RiskResp)
+        responses.extend(batch_responses)
+    
+    # Записываем результаты в CSV
     out_csv.parent.mkdir(exist_ok=True, parents=True)
     with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:
         fieldnames = ["A_id", "B_id", "risk", "reason"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
-        for _, row_a in tqdm(targets.iterrows(),
-                            total=len(targets),
-                            leave=False,
-                            desc="matrix"):
-            a_id   = int(row_a.event_id)
-            a_text = (
-                f"Текст: {row_a.raw_text}\n"
-                f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
-                f"Ресурсы: {row_a.resources}"
-            )
-
-            # выбираем кандидатов из второй колонки
-            # исключаем A_id, чтобы не сравнивать с самим собой
-            # и берём только те, что в пределах [second_col_l, second_col_u)
-            candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]
-            prompts = []
-
-            for _, row_b in candidates.iterrows():
-                b_id = int(row_b.event_id)
-                b_text = (
-                    f"Текст: {row_b.raw_text}\n"
-                    f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
-                    f"Ресурсы: {row_b.resources}"
-                )
-                prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
-                prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
-
-            responses = engine.chat_batch(prompts, json_schema=RiskResp)
-
-            for idx, (prompt, response) in enumerate(zip(prompts, responses)):
-                record = {
-                    "A_id": a_id,
-                    "B_id": candidates.iloc[idx].event_id,
-                    "risk": float(response.get("risk", 0.0)),
-                    "reason": response.get("reason", "")
-                }
-                records.append(record)
-                writer.writerow(record)
-                csvfile.flush()
+        for (a_id, b_id), response in zip(all_pairs, responses):
+            record = {
+                "A_id": a_id,
+                "B_id": b_id,
+                "risk": float(response.get("risk", 0.0)),
+                "reason": response.get("reason", "")
+            }
+            writer.writerow(record)
             
     print(f"✔ risk matrix → {out_csv}")
 

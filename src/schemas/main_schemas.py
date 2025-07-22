@@ -15,6 +15,7 @@ class EngineConfig(BaseModel):
     quantization: str = 'fp8'
     tensor_parallel_size: int = 1
     max_model_length: int = 2048
+    max_batch_size: int = 1000
 
 class AppConfig(BaseModel):
     vllm_engine_config: EngineConfig
