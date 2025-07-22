@@ -26,12 +26,12 @@ class VLLMEngine:
                                tensor_parallel_size=engine_config.tensor_parallel_size
                                )
         self.system_prompt = system_prompt 
+        self.bath_size = engine_config.max_batch_size
 
     def chat_batch(self, items: Optional[Sequence[ChatItem]] = None,
                    sampling_params: Dict[str, Any] = None,
                    json_schema: Any = None,
-                   max_retries: int = 2,
-                   batch_size:int = 1000) -> List[Dict[str, Any]]:
+                   max_retries: int = 2) -> List[Dict[str, Any]]:
         if sampling_params is None:
             sampling_params = SamplingParams(
                 temperature=0.3,
@@ -66,8 +66,8 @@ class VLLMEngine:
                 schema_dict = json_schema
 
             # Разбиваем на батчи
-            for i in range(0, len(remaining_indices), batch_size):
-                batch_indices = remaining_indices[i:i+batch_size]
+            for i in range(0, len(remaining_indices), self.batch_size):
+                batch_indices = remaining_indices[i:i+self.batch_size]
                 batch_prompts = [full_prompts[idx] for idx in batch_indices]
 
                 try:

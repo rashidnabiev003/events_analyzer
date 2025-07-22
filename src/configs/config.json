@@ -6,7 +6,8 @@
     "trust_remote_code":true,
     "quantization":"fp8",
     "tensor_parallel_size":2,
-    "max_model_length":2048
+    "max_model_length":8192,
+    "max_batch_size": 1000
     }
 
 }
