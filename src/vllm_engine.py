@@ -30,14 +30,15 @@ class VLLMEngine:
     def chat_batch(self, items: Optional[Sequence[ChatItem]] = None,
                    sampling_params: Dict[str, Any] = None,
                    json_schema: Any = None,
-                   max_retries: int = 2) -> List[Dict[str, Any]]:
+                   max_retries: int = 2,
+                   batch_size:int = 1000) -> List[Dict[str, Any]]:
         if sampling_params is None:
             sampling_params = SamplingParams(
-                temperature=0.2,
-                top_p=0.95,
+                temperature=0.3,
+                top_p=0.92,
                 top_k=50,
-                max_tokens=600,
-                repetition_penalty=1.35,
+                max_tokens=2000,
+                repetition_penalty=1.2,
                 seed=42,
             )
 
@@ -49,41 +50,42 @@ class VLLMEngine:
                 for item in items
             ]
         
-        responses = []
-        for attempt in range(max_retries):
-            outputs = self.vllm_engine.chat(full_prompts, sampling_params)
+        responses = [None] * len(full_prompts)
+        remaining_indices = list(range(len(full_prompts)))
 
-            current_responses = []
-            for idx, out in enumerate(outputs):
-                txt = out.outputs[0].text.strip() if out.outputs else ""
-                try:
-                    data = extract_json(txt)
-                    if isinstance(json_schema, type) and issubclass(json_schema, BaseModel):
-                        schema_dict = json_schema.model_json_schema()
-                    else:
-                        schema_dict = json_schema
-                    validate(instance=data, schema=schema_dict)
-                    current_responses.append(data)
-                except ValidationError as e:
-                    print(f"Validation failed for item {idx}, retrying: {e.message}")
-                    current_responses.append(None)
-                except Exception as e:
-                    print(f"Parse error for item {idx}: {e}")
-                    current_responses.append(None)
-
-            # Обновляем full_prompts для неудачных запросов
-            full_prompts = [
-                prompt for prompt, resp in zip(full_prompts, current_responses) if resp is None
-            ]
-            if not full_prompts:
+        for _ in range(max_retries):
+            if not remaining_indices:
                 break
 
-
-        result = []
-        for item in current_responses:
-            if item:
-                result.append(item)
+            # Преобразуем json_schema в словарь
+            if isinstance(json_schema, type) and issubclass(json_schema, BaseModel):
+                schema_dict = json_schema.model_json_schema()
+                if not isinstance(schema_dict, dict):
+                    raise ValueError("model_json_schema() должен возвращать словарь")
             else:
-                result.append({"risk": 0.0, "reason": "JSON validation failed"})
-        
-        return result
+                schema_dict = json_schema
+
+            # Разбиваем на батчи
+            for i in range(0, len(remaining_indices), batch_size):
+                batch_indices = remaining_indices[i:i+batch_size]
+                batch_prompts = [full_prompts[idx] for idx in batch_indices]
+
+                try:
+                    outputs = self.vllm_engine.chat(batch_prompts, sampling_params)
+                    for idx, out in enumerate(outputs):
+                        original_idx = batch_indices[idx]
+                        txt = out.outputs[0].text.strip() if out.outputs else ""
+                        data = extract_json(txt)
+                        validate(instance=data, schema=schema_dict)
+                        responses[original_idx] = data
+                        remaining_indices.remove(original_idx)
+                except ValidationError as e:
+                    print(f"Validation failed for item {original_idx}: {e.message}")
+                except Exception as e:
+                    print(f"Parse error for item {original_idx}: {e}")
+
+        # Заполняем пустые результаты заглушками
+        for i in range(len(responses)):
+            if responses[i] is None:
+                responses[i] = {"risk": 0.0, "reason": "Validation failed"}
+        return responses

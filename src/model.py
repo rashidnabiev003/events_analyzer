@@ -32,7 +32,6 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 SYSTEM_PROMPT = (
    """
-/no_think
 Ты — эксперт по анализу рисков в проектах национальных мероприятий. Перед тобой пара событий:
 - Мероприятие исходное
 - Мероприятие наиболее связное
@@ -85,7 +84,6 @@ resources – список ключевых ресурсов или подряд
 """
 
 RISK_PROMPT = """
-/ no_think
 Вот 2 мероприятия их описания и названия. Тебе нужно объяснить связность этих мероприятий. Рассуждай логически, точно и цельно.
 - Исходное мероприятие : {a_text}  
 - Связное мероприятие : {b_text}
@@ -98,7 +96,6 @@ json
 }}
 Начинайте сразу после этого сообщения.
 """
-
 
 cfg = load_config()        
 engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_PROMPT) 
@@ -173,8 +170,7 @@ def risk_matrix(
     second_col_l: int = 0,
     second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
-    sleep_s: float = 0.25,
-    flag: int | None = None
+    global_batch_size: int = 100
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
@@ -226,7 +222,6 @@ def risk_matrix(
                 records.append(record)
                 writer.writerow(record)
                 csvfile.flush()
-                time.sleep(sleep_s)
             
     print(f"✔ risk matrix → {out_csv}")
 
