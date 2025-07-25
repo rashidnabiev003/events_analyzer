@@ -51,41 +51,49 @@ class VLLMEngine:
             ]
         
         responses = [None] * len(full_prompts)
-        remaining_indices = list(range(len(full_prompts)))
+        remaining = list(range(len(full_prompts)))
 
-        for _ in range(max_retries):
-            if not remaining_indices:
+        for attempt in range(max_retries + 1):
+            if not remaining:
                 break
+            sampling_params.seed = self.base_seed + attempt
 
-            # Преобразуем json_schema в словарь
-            if isinstance(json_schema, type) and issubclass(json_schema, BaseModel):
-                schema_dict = json_schema.model_json_schema()
-                if not isinstance(schema_dict, dict):
-                    raise ValueError("model_json_schema() должен возвращать словарь")
-            else:
-                schema_dict = json_schema
-
-            # Разбиваем на батчи
-            for i in range(0, len(remaining_indices), self.batch_size):
-                batch_indices = remaining_indices[i:i+self.batch_size]
-                batch_prompts = [full_prompts[idx] for idx in batch_indices]
-
+            for i in range(0, len(remaining), self.batch_size):
+                idx_batch = remaining[i : i + self.batch_size]
+                prompts_batch = [full_prompts[j] for j in idx_batch]
                 try:
-                    outputs = self.vllm_engine.chat(batch_prompts, sampling_params)
-                    for idx, out in enumerate(outputs):
-                        original_idx = batch_indices[idx]
-                        txt = out.outputs[0].text.strip() if out.outputs else ""
-                        data = extract_json(txt)
-                        validate(instance=data, schema=schema_dict)
-                        responses[original_idx] = data
-                        remaining_indices.remove(original_idx)
-                except ValidationError as e:
-                    print(f"Validation failed for item {original_idx}: {e.message}")
+                    outputs = self.vllm_engine.chat(prompts_batch, sampling_params)
                 except Exception as e:
-                    print(f"Parse error for item {original_idx}: {e}")
+                    print(f"[vllm] Ошибка батча attempt={attempt} idx={idx_batch}: {e}")
+                    continue
 
-        # Заполняем пустые результаты заглушками
-        for i in range(len(responses)):
-            if responses[i] is None:
-                responses[i] = {"risk": 0.0, "reason": "Validation failed"}
+                for out_idx, out in enumerate(outputs):
+                    orig_idx = idx_batch[out_idx]
+                    text = out.outputs[0].text.strip() if out.outputs else ""
+                    try:
+                        data = extract_json(text)
+                        validate(instance=data, schema=json_schema.model_json_schema())
+                        responses[orig_idx] = data
+                        remaining.remove(orig_idx)
+                    except Exception:
+                        # Всё ещё невалиден — оставляем в remaining
+                        pass
+
+        # 2) Для каждого оставшегося — индивидуальные попытки до успеха
+        for idx in remaining:
+            attempt = 0
+            while True:
+                seed = self.base_seed + max_retries + attempt + 1
+                sampling_params.seed = seed
+                try:
+                    output = self.vllm_engine.chat([full_prompts[idx]], sampling_params)[0]
+                    text = output.outputs[0].text.strip() if output.outputs else ""
+                    data = extract_json(text)
+                    validate(instance=data, schema=json_schema.model_json_schema())
+                    responses[idx] = data
+                    break
+                except Exception as e:
+                    print(f"[vllm][fallback] idx={idx}, attempt={attempt}: {e}")
+                    attempt += 1
+
         return responses
