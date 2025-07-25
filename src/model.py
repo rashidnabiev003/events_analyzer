@@ -237,9 +237,7 @@ def process_file(
 
 def process_folder(
     input_dir: Path,
-    output_dir: Path,
-    lines: int = 100,
-    flag: int | None = 0
+    output_dir: Path
 ) -> None:
     """
     Обходит все xlsx-файлы в input_dir и обрабатывает каждый через process_file().
@@ -248,9 +246,7 @@ def process_folder(
     for xlsx_path in get_xlsx_files(input_dir):
         process_file(
             xlsx_path=xlsx_path,
-            output_dir=output_dir,
-            lines=lines,
-            flag=flag
+            output_dir=output_dir
         )
 
 def _parse_cli() -> argparse.Namespace:
@@ -274,20 +270,10 @@ def _parse_cli() -> argparse.Namespace:
     return p.parse_args()
 
 
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
     args = _parse_cli()
-    # Инициализация движка VLLM
-    engine_config = ...  # загрузка конфигурации
-    vllm_engine = VLLMEngine(engine_config)
+    # Инициализация движка VLLM 
+    vllm_engine = engine
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.input_path.is_dir():
