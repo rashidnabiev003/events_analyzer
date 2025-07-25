@@ -274,6 +274,15 @@ def _parse_cli() -> argparse.Namespace:
     return p.parse_args()
 
 
+
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
     args = _parse_cli()
     # Инициализация движка VLLM
