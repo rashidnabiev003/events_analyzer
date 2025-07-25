@@ -103,48 +103,40 @@ RAW_DIR = Path("data")
 RAW_DIR.mkdir(exist_ok=True)
 
 def enrich_with_metadata(
-    xlsx_path: Path,
-    lines: int = 100,
-    out_csv: Path = RAW_DIR / "enriched.csv",
-    sleep_s: float = 0.350,
-    flag: int | None = 0
-) -> Path:
+    df: pd.DataFrame,
+    vllm_engine: VLLMEngine,
+    json_schema: Any
+) -> pd.DataFrame:
     """
-    1) Берёт первые `lines` строк Excel.
-    2) Формирует raw_text (title+desc) → raw.csv.
-    3) У каждого raw_text запрашивает Ollama, вытаскивая region/start/end/resources.
-    4) Сохраняет enriched.csv.
+    Обогащает DataFrame df метаданными через пакетные запросы vllm.
     """
-    # 1-a. raw.csv
-    raw_csv = build_raw(xlsx_path, lines)
-    df = pd.read_csv(raw_csv)
-
-    # добавляем колонку-заглушки
+    # Prepare placeholder columns
     for col in ("region", "start", "end", "resources"):
         df[col] = ""
 
-    # 1-b. спрашиваем Ollama по каждой строке
-    for idx, row in tqdm(df.iterrows(), 
-                        total=len(df),
-                        desc="metadata",
-                        leave=False):
-        prompt = METADATA_PROMPT.format(text=row["raw_text"])
-        try:
-            ans = chat(prompt=prompt, system_prompt=SYSTEM_METADATA_PROMPT, json_schema=Clast, flag=flag)
-            meta = extract_json(ans)
-        except Exception as e:
-            print("Parse error:", e) 
+    # Build chat items for all rows
+    items = [
+        ChatItem(
+            system_prompt=SYSTEM_METADATA_PROMPT,
+            prompt=METADATA_PROMPT.format(text=raw_text)
+        ) for raw_text in df["raw_text"].tolist()
+    ]
 
-        df.at[idx, "region"]    = meta['region']
-        df.at[idx, "start"]     = meta['start']
-        df.at[idx, "end"]       = meta['end']
-        df.at[idx, "resources"] = ";".join(meta['resources'])
-        time.sleep(sleep_s)
+    # Batch request to VLLMEngine
+    responses = vllm_engine.chat_batch(
+        items=items,
+        json_schema=json_schema
+    )
 
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_csv, index=False, encoding="utf-8")
-    print(f"✔ enriched CSV → {out_csv}")
-    return out_csv
+    # Populate DataFrame
+    for idx, resp in enumerate(responses):
+        df.at[idx, "region"] = resp.get("region", "")
+        df.at[idx, "start"] = resp.get("start", "")
+        df.at[idx, "end"] = resp.get("end", "")
+        resources = resp.get("resources", [])
+        df.at[idx, "resources"] = ";".join(resources) if isinstance(resources, list) else resources
+
+    return df
 
 def risk_matrix(
     enriched_csv: Path = RAW_DIR / "enriched.csv",
@@ -152,8 +144,7 @@ def risk_matrix(
     first_col_u: int = 10,
     second_col_l: int = 0,
     second_col_u: int = 50,
-    out_csv: Path = RAW_DIR / "risk_matrix.csv",
-    global_batch_size: int = 1000
+    out_csv: Path = RAW_DIR / "risk_matrix.csv"
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
@@ -208,58 +199,89 @@ def risk_matrix(
             
     print(f"✔ risk matrix → {out_csv}")
 
+def get_xlsx_files(input_dir: Path) -> list[Path]:
+    """
+    Возвращает список всех .xlsx файлов в папке input_dir.
+    """
+    return sorted(input_dir.glob("*.xlsx"))
+
+def process_file(
+    xlsx_path: Path,
+    output_dir: Path,
+    vllm_engine: VLLMEngine
+) -> None:
+    name = xlsx_path.stem
+    df = pd.read_excel(xlsx_path)
+
+    # Enrich metadata
+    enriched_df = enrich_with_metadata(
+        df=df,
+        vllm_engine=vllm_engine,
+        json_schema=Clast
+    )
+    enriched_csv = output_dir / f"enriched_{name}.csv"
+    enriched_df.to_csv(enriched_csv, index=False)
+    print(f"✔ enriched CSV → {enriched_csv}")
+
+    # Risk matrix
+    risk_csv = output_dir / f"risk_{name}.csv"
+    risk_matrix(
+        enriched_csv=enriched_csv,
+        first_col_l=0,
+        first_col_u=len(enriched_df),
+        second_col_l=0,
+        second_col_u=len(enriched_df),
+        out_csv=risk_csv
+    )
+    print(f"✔ processed {name} → {risk_csv}")
+
+def process_folder(
+    input_dir: Path,
+    output_dir: Path,
+    lines: int = 100,
+    flag: int | None = 0
+) -> None:
+    """
+    Обходит все xlsx-файлы в input_dir и обрабатывает каждый через process_file().
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for xlsx_path in get_xlsx_files(input_dir):
+        process_file(
+            xlsx_path=xlsx_path,
+            output_dir=output_dir,
+            lines=lines,
+            flag=flag
+        )
 
 def _parse_cli() -> argparse.Namespace:
-    """Возвращает объект с полями .cmd, .webui, .excel, .lines …"""
-    p = argparse.ArgumentParser(prog="events_analyzer",
-                                description="CLI для build / risk / matrix")
-
-    # глобальный флаг – какой бэкенд использовать
-    p.add_argument("--webui",  action="store_true",
-                   help="использовать удалённый WebUI (по-умолчанию Ollama)")
-    p.add_argument("--ollama", action="store_true",
-                   help="форсировать локальный Ollama (переопределяет --webui)")
-
+    p = argparse.ArgumentParser(
+        prog="events_analyzer",
+        description="Обработка XLSX: обогащение и расчет risk matrix"
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # --- build ---
-    sb = sub.add_parser("build", help="собрать enriched.csv из Excel")
-    sb.add_argument("excel", type=Path, help="путь к .xlsx")
-    sb.add_argument("-l", "--lines", type=int, default=100,
-                    help="сколько строк читать (default: 100)")
-
-    # --- matrix ---
-    sm = sub.add_parser("matrix", help="матрица рисков N×K")
-    sm.add_argument("enriched", type=Path, help="enriched.csv")
-    sm.add_argument("-tl", "--first_low", type=int, default=0,
-                    help="Нижний порог для первой колонки (default: 0)")
-    sm.add_argument("-tu", "--firts_top", type=int, default=10,
-                    help="Верхний порог для первой колонки (default: 10)")
-    sm.add_argument("-nl", "--second_low",   type=int, default=0,
-                    help="Нижний порог для второй колонки (default: 0)")
-    sm.add_argument("-nu", "--second_top",   type=int, default=50,
-                    help="Верхний порог для второй колонки (default: 50)")
-    sm.add_argument("-o", "--out", type=Path, default=RAW_DIR / "risk_matrix.csv",
-                    help="путь к выходному файлу (default: data/risk_matrix.csv)")
-
+    sp = sub.add_parser(
+        "process", help="Обработать файл или папку с XLSX"
+    )
+    sp.add_argument(
+        "input_path", type=Path,
+        help=".xlsx файл или папка с .xlsx"
+    )
+    sp.add_argument(
+        "output_dir", type=Path,
+        help="Куда сохранять результаты"
+    )
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_cli()
+    # Инициализация движка VLLM
+    engine_config = ...  # загрузка конфигурации
+    vllm_engine = VLLMEngine(engine_config)
 
-    if args.cmd == "build":
-        enrich_with_metadata(
-            xlsx_path=args.excel,
-            lines=args.lines + 1,
-        )
-
-    elif args.cmd == "matrix":
-        risk_matrix(
-            enriched_csv=args.enriched,
-            first_col_l=args.first_low,
-            first_col_u=args.firts_top,
-            second_col_l=args.second_low,
-            second_col_u=args.second_top,
-            out_csv=args.out,
-        )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.input_path.is_dir():
+        process_folder(args.input_path, args.output_dir, vllm_engine)
+    else:
+        process_file(args.input_path, args.output_dir, vllm_engine)
