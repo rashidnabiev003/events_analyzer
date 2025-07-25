@@ -102,23 +102,6 @@ engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_P
 RAW_DIR = Path("data")
 RAW_DIR.mkdir(exist_ok=True)
 
-
-
-json_re = re.compile(r"\{[\s\S]*\}")
-
-def extract_json(text: str) -> dict:
-    # 1. убираем <think>…</think>
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
-
-    # 2. удаляем лишь маркеры ```json и ```
-    text = re.sub(r"```json\s*|\s*```", "", text, flags=re.I)
-
-    # 3. ищем первый {...}
-    m = json_re.search(text)
-    if not m:
-        raise ValueError("JSON not found in model output")
-    return json.loads(m.group(0))
-
 def enrich_with_metadata(
     xlsx_path: Path,
     lines: int = 100,
