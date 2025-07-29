@@ -100,7 +100,6 @@ json
 """
 
 cfg = load_config()        
-engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_PROMPT) 
 RAW_DIR = Path("data")
 RAW_DIR.mkdir(exist_ok=True)
 
@@ -148,7 +147,8 @@ def risk_matrix(
     second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     candidate_pairs: Optional[List[tuple[int, int]]] = None,
-    searcher: Optional[EventsSemanticSearch] = None
+    searcher: Optional[EventsSemanticSearch] = None,
+    engine: VLLMEngine = None,
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
@@ -213,7 +213,7 @@ def get_xlsx_files(input_dir: Path) -> list[Path]:
 def process_file(
     xlsx_path: Path,
     output_dir: Path,
-    vllm_engine: VLLMEngine | None = engine
+    engine: VLLMEngine = None
 ) -> None:
     name = xlsx_path.stem
     raw_csv = build_raw(
@@ -230,7 +230,7 @@ def process_file(
 
     enriched_df = enrich_with_metadata(
         df=df,
-        vllm_engine=vllm_engine,
+        vllm_engine=engine,
         json_schema=Clast
     )
     enriched_csv = output_dir / f"enriched_{name}.csv"
@@ -253,7 +253,8 @@ def process_file(
 
 def process_folder(
     input_dir: Path,
-    output_dir: Path
+    output_dir: Path,
+    engine: VLLMEngine = None
 ) -> None:
     """
     Обходит все xlsx-файлы в input_dir и обрабатывает каждый через process_file().
@@ -262,7 +263,8 @@ def process_folder(
     for xlsx_path in get_xlsx_files(input_dir):
         process_file(
             xlsx_path=xlsx_path,
-            output_dir=output_dir
+            output_dir=output_dir,
+            engine=engine
         )
 
 def _parse_cli() -> argparse.Namespace:
@@ -289,10 +291,10 @@ def _parse_cli() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_cli()
     # Инициализация движка VLLM 
-    vllm_engine = engine
+    engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_PROMPT)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.input_path.is_dir():
-        process_folder(args.input_path, args.output_dir)
+        process_folder(args.input_path, args.output_dir, engine)
     else:
-        process_file(args.input_path, args.output_dir, vllm_engine)
+        process_file(args.input_path, args.output_dir, engine)
