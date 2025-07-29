@@ -148,7 +148,7 @@ def risk_matrix(
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     candidate_pairs: Optional[List[tuple[int, int]]] = None,
     searcher: Optional[EventsSemanticSearch] = None,
-    engine: VLLMEngine = None,
+    engine: VLLMEngine | None = None
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
@@ -166,21 +166,30 @@ def risk_matrix(
             if str(a.event_id) != str(b.event_id)
         ]
 
-    # Собираем все пары A и B
-    all_prompts = []
-    all_pairs = []
-    id_to_row = {str(r.event_id): r for _, r in df.iterrows()}
-    from src.schemas.main_schemas import ChatItem  # уже есть у вас
+    id_to_row = {int(r.event_id): r for _, r in df.iterrows()}
+    all_prompts: List[ChatItem] = []
+    all_pairs: List[tuple[int, int]] = []
 
-    for a_id, b_id in candidate_pairs:
-        row_a, row_b = id_to_row[a_id], id_to_row[b_id]
-        a_text = f"Текст: {row_a.raw_text}\nРегион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; Ресурсы: {row_a.resources}"
-        b_text = f"Текст: {row_b.raw_text}\nРегион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; Ресурсы: {row_b.resources}"
-        prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)  # у вас уже определён
-        all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
-        all_pairs.append((int(a_id), int(b_id)))
+    for a_id_str, b_id_str in tqdm(candidate_pairs, total=len(candidate_pairs), desc="Collecting pairs"):
+            a_id, b_id = int(a_id_str), int(b_id_str)
+            row_a, row_b = id_to_row[a_id], id_to_row[b_id]
+
+            a_text = (
+                f"Текст: {row_a.raw_text}\n"
+                f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
+                f"Ресурсы: {row_a.resources}"
+            )
+            b_text = (
+                f"Текст: {row_b.raw_text}\n"
+                f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
+                f"Ресурсы: {row_b.resources}"
+            )
+
+            prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
+            all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
+            all_pairs.append((a_id, b_id))
     
-    responses = []
+    responses: List[Dict] = []
     for i in range(0, len(all_prompts), cfg.vllm_engine_config.max_batch_size):
         batch = all_prompts[i:i + cfg.vllm_engine_config.max_batch_size]
         batch_responses = engine.chat_batch(batch, json_schema=RiskResp)
@@ -216,17 +225,13 @@ def process_file(
     engine: VLLMEngine = None
 ) -> None:
     name = xlsx_path.stem
+
     raw_csv = build_raw(
         xlsx_path=xlsx_path,
         column_idx=(0, 1, 2),
         out_path=output_dir / "raw.csv",
     )
     df = pd.read_csv(raw_csv)
-    # Enrich metadata
-
-    search_dir = output_dir / "search_index"
-    searcher = EventsSemanticSearch(workdir=search_dir, cfg=BuildConfig(force_cpu=False), enable_rerank=True)
-    searcher.build_from_dataframe(df)
 
     enriched_df = enrich_with_metadata(
         df=df,
@@ -236,6 +241,11 @@ def process_file(
     enriched_csv = output_dir / f"enriched_{name}.csv"
     enriched_df.to_csv(enriched_csv, index=False)
     print(f"✔ enriched CSV → {enriched_csv}")
+
+    search_dir = output_dir / "search_index"
+    searcher = EventsSemanticSearch(workdir=search_dir, cfg=BuildConfig(force_cpu=True))
+    searcher.build_from_dataframe(enriched_df, text_col="raw_text", id_col="event_id")
+    pairs = searcher.batch_similar_pairs_for_all(top_k_per_event=20, id_col="event_id")
 
     pairs = searcher.similar_pairs_for_all(enriched_df, text_col="raw_text", id_col="event_id", top_k_per_event=20)
     
@@ -247,14 +257,15 @@ def process_file(
         second_col_l=0, second_col_u=len(enriched_df),
         out_csv=risk_csv,
         candidate_pairs=pairs,
-        searcher=searcher
+        searcher=searcher,
+        engine=engine
     )
     print(f"✔ processed {name} → {risk_csv}")
 
 def process_folder(
     input_dir: Path,
     output_dir: Path,
-    engine: VLLMEngine = None
+    engine: VLLMEngine |None = None
 ) -> None:
     """
     Обходит все xlsx-файлы в input_dir и обрабатывает каждый через process_file().
