@@ -27,6 +27,12 @@ def test_extract_json():
     result = extract_json(text)
     assert result == {"risk": 0.1, "reason": "test"}
 
+def test_extract_json_invalid():
+    from src.vllm_engine import extract_json
+    text = '<think>...</think>```json {risk: 0.1, reason: test} ```'  # невалидный json
+    result = extract_json(text)
+    assert result is None or result == {}
+
 def test_vllm_engine_chat_batch(monkeypatch):
     # Подменяем LLM на DummyLLM
     import src.vllm_engine as vllm_engine_mod
