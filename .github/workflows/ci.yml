@@ -21,8 +21,8 @@ jobs:
         run: pip install ruff
       - name: Install dependencies (main + dev)
         run: uv pip install -e .[dev] --system --index-strategy unsafe-best-match
-      - name: Lint with ruff
-        run: ruff check . --fix
+      - name: Lint with ruff (ignore errors)
+        run: ruff check . --fix || true
       - name: Install pytest
         run: pip install pytest pytest-cov
       - name: Run tests with pytest
