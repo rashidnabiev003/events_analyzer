@@ -18,7 +18,7 @@ jobs:
       - name: Install uv (fast dependency resolver)
         run: pip install uv
       - name: Install dependencies (main + dev)
-        run: uv pip install -e .[dev]
+        run: uv pip install -e .[dev] --system
       - name: Lint with ruff
         run: ruff check .
       - name: Run tests with pytest
