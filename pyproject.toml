@@ -104,9 +104,5 @@ quote-style = "single"
 indent-style = "tab"
 docstring-code-format = true
 
-torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-
 [[tool.uv.index]]
 url = "https://download.pytorch.org/whl/cu128"
