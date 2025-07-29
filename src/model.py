@@ -151,11 +151,7 @@ def risk_matrix(
     engine: VLLMEngine | None = None
 ) -> None:
     df = pd.read_csv(enriched_csv)
-    targets = df.iloc[first_col_l:first_col_u]
-
-    if candidate_pairs is None and searcher is not None:
-        candidate_pairs = searcher.batch_similar_pairs_for_all(df, text_col="raw_text", id_col="event_id", top_k_per_event=20)
-
+    
     if not candidate_pairs:
         targets = df.iloc[first_col_l:first_col_u]
         candidates = df.iloc[second_col_l:second_col_u]
@@ -245,9 +241,7 @@ def process_file(
     search_dir = output_dir / "search_index"
     searcher = EventsSemanticSearch(workdir=search_dir, cfg=BuildConfig(force_cpu=True))
     searcher.build_from_dataframe(enriched_df, text_col="raw_text", id_col="event_id")
-    pairs = searcher.batch_similar_pairs_for_all(top_k_per_event=20, id_col="event_id")
-    pairs = searcher.batch_similar_pairs_for_all(enriched_df, text_col="raw_text", id_col="event_id", top_k_per_event=20)
-    
+    pairs = searcher.batch_similar_pairs_for_all(top_k_per_event=20, id_col="event_id")    
     # Risk matrix
     risk_csv = output_dir / f"risk_{name}.csv"
     risk_matrix(
