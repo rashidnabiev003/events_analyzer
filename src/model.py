@@ -46,21 +46,23 @@ SYSTEM_PROMPT = (
    - 3 = значительное  
    - 4 = критическое
 
-   Аспекты:  
-   - time_level — влияние на сроки  
-   - resource_level — влияние на ресурсы (финансовые, человеческие, материальные)   
+   Сначала СКРЫТО (для себя) посчитай уровни↴ :  
+  - time_level  ∈ {0,1,2,3,4} — влияние на сроки 
+  - resource_level ∈ {0,1,2,3,4} — влияние на ресурсы (финансовые, человеческие, материальные)  
 
 2. Вычислите общий риск как сумму 2 уровней:  
-total_risk = time_level + resource_level // диапазон 0–12
+total_risk = time_level + resource_level // диапазон 0–8
 
-3. Вычислите вероятность негативного исхода как отношение:  
-probability_failure = total_risk / 12.0 // число от 0.0 до 1.0
+Потом вычисли:  
+  total_risk = time_level + resource_level       # 0-8  
+  probability_failure = total_risk / 8 # с двумя знаками
 
 **Формат ответа (строго JSON):**
 {
-  "risk": probability_failure,
+  "risk": <float>  # ДОЛЖЕН равняться probability_failure
   "reason": "Исходное мероприятие: ...\nНаиболее связанное мероприятие: ...\nОбъяснение зависимости: ..."
 }
+Если в расчётах ошибся — исправь и выведи верный JSON.
 """
 )
 SYSTEM_METADATA_PROMPT = (
@@ -151,7 +153,7 @@ def risk_matrix(
     engine: VLLMEngine | None = None
 ) -> None:
     df = pd.read_csv(enriched_csv)
-    
+
     if not candidate_pairs:
         targets = df.iloc[first_col_l:first_col_u]
         candidates = df.iloc[second_col_l:second_col_u]
