@@ -17,6 +17,8 @@ jobs:
           python-version: '3.12'
       - name: Install uv (fast dependency resolver)
         run: pip install uv
+      - name: Install ruff
+        run: pip install ruff
       - name: Install dependencies (main + dev)
         run: uv pip install -e .[dev] --system --index-strategy unsafe-best-match
       - name: Lint with ruff
