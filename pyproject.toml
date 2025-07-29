@@ -9,7 +9,6 @@ authors = [
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "hdbscan>=0.8.40",
     "matplotlib>=3.10.3",
     "numpy<2",
     "openpyxl>=3.1.5",
@@ -18,7 +17,6 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "pyyaml>=6.0.2",
     "requests>=2.32.4",
-    "scikit-learn>=1.7.0",
     "sentence-transformers>=5.0.0",
     "torch==2.7.0",
     "torchaudio>=2.7.0",
