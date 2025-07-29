@@ -1,22 +1,32 @@
-import pytest
 import pandas as pd
-from src.utils import embeddings_search as embeddings
 import numpy as np
+import pytest
+from src.utils.embeddings_search import EventsSemanticSearch, BuildConfig
+from pathlib import Path
 
-def test_text_to_embeddings(monkeypatch, tmp_path):
-    # Подменяем SentenceTransformer и np.save
-    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda name: type("M", (), {"encode": lambda self, texts, **kw: np.zeros((len(texts), 3))})())
-    monkeypatch.setattr(embeddings.np, "save", lambda path, arr: None)
-    df = pd.DataFrame({0: ["a", "b"]})
-    result = embeddings.text_to_embeddings(df)
-    assert "Ready and saved" in result 
+def test_build_from_dataframe(tmp_path):
+    # Минимальный DataFrame для индекса
+    df = pd.DataFrame({
+        "event_id": [1, 2],
+        "raw_text": ["test event one", "test event two"]
+    })
+    workdir = tmp_path / "search"
+    search = EventsSemanticSearch(workdir=workdir, cfg=BuildConfig(batch_size=2, force_cpu=True))
+    search.build_from_dataframe(df)
+    assert (workdir / "events.faiss").exists()
+    assert (workdir / "metadata.json").exists()
+    assert (workdir / "embeddings.npy").exists()
 
+    # Проверка загрузки индекса
+    search.load()
+    assert search.index is not None
+    assert isinstance(search.metadata, list)
 
-def test_text_to_embeddings_empty(monkeypatch):
-    from src.utils import embeddings_search as embeddings
-    import pandas as pd
-    df = pd.DataFrame()
-    monkeypatch.setattr(embeddings, "SentenceTransformer", lambda name: type("M", (), {"encode": lambda self, texts, **kw: []})())
-    monkeypatch.setattr(embeddings.np, "save", lambda path, arr: None)
-    result = embeddings.text_to_embeddings(df)
-    assert "empty" in result.lower() or result == "" 
+# Тест на пустой DataFrame
+
+def test_build_from_empty_dataframe(tmp_path):
+    df = pd.DataFrame({"event_id": [], "raw_text": []})
+    workdir = tmp_path / "search_empty"
+    search = EventsSemanticSearch(workdir=workdir, cfg=BuildConfig(batch_size=2, force_cpu=True))
+    with pytest.raises(Exception):
+        search.build_from_dataframe(df) 
