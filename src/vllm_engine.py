@@ -27,6 +27,7 @@ class VLLMEngine:
                                )
         self.system_prompt = system_prompt 
         self.batch_size = engine_config.max_batch_size
+        self.base_seed = 42
 
     def chat_batch(self, items: Optional[Sequence[ChatItem]] = None,
                    sampling_params: Dict[str, Any] = None,
