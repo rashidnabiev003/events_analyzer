@@ -208,11 +208,15 @@ def get_xlsx_files(input_dir: Path) -> list[Path]:
 def process_file(
     xlsx_path: Path,
     output_dir: Path,
-    vllm_engine: VLLMEngine
+    vllm_engine: VLLMEngine | None = engine
 ) -> None:
     name = xlsx_path.stem
-    df = pd.read_excel(xlsx_path)
-
+    raw_csv = build_raw(
+        xlsx_path=xlsx_path,
+        column_idx=(0, 1, 2),
+        out_path=output_dir / "raw.csv",
+    )
+    df = pd.read_csv(raw_csv)
     # Enrich metadata
     enriched_df = enrich_with_metadata(
         df=df,
@@ -277,6 +281,6 @@ if __name__ == "__main__":
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.input_path.is_dir():
-        process_folder(args.input_path, args.output_dir, vllm_engine)
+        process_folder(args.input_path, args.output_dir)
     else:
         process_file(args.input_path, args.output_dir, vllm_engine)
