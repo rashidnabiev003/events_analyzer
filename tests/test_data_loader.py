@@ -9,7 +9,7 @@ def test_build_raw_basic(tmp_path):
     xlsx_path = tmp_path / "test.xlsx"
     df.to_excel(xlsx_path, header=False, index=False)
     out_path = tmp_path / "raw.csv"
-    result = data_loader.build_raw(xlsx_path=xlsx_path, column_idx=(0,1,2), out_path=out_path, sheet_name=None)
+    result = data_loader.build_raw(xlsx_path=xlsx_path, column_idx=(0,1,2), out_path=out_path, sheet_name=0)
     assert Path(result).exists()
     df2 = pd.read_csv(result)
     assert "event_id" in df2.columns
