@@ -19,10 +19,12 @@ from src.schemas.main_schemas import (AppConfig,
                                         RiskResp,
                                         Description,
                                         ChatItem)
+from typing import Optional, List
 from pydantic import TypeAdapter
 import pandas as pd
 import requests
 from tqdm import tqdm
+from src.utils.embeddings_search import EventsSemanticSearch, BuildConfig
 
 CONFIG_PATH = CONFIG_PATH = ROOT / "src" / "configs" / "config.json" 
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
@@ -144,36 +146,39 @@ def risk_matrix(
     first_col_u: int = 10,
     second_col_l: int = 0,
     second_col_u: int = 50,
-    out_csv: Path = RAW_DIR / "risk_matrix.csv"
+    out_csv: Path = RAW_DIR / "risk_matrix.csv",
+    candidate_pairs: Optional[List[tuple[int, int]]] = None,
+    searcher: Optional[EventsSemanticSearch] = None
 ) -> None:
     df = pd.read_csv(enriched_csv)
     targets = df.iloc[first_col_l:first_col_u]
 
+    if candidate_pairs is None and searcher is not None:
+        candidate_pairs = searcher.similar_pairs_for_all(df, text_col="raw_text", id_col="event_id", top_k_per_event=20)
+
+    if not candidate_pairs:
+        targets = df.iloc[first_col_l:first_col_u]
+        candidates = df.iloc[second_col_l:second_col_u]
+        candidate_pairs = [
+            (str(a.event_id), str(b.event_id))
+            for _, a in targets.iterrows()
+            for _, b in candidates.iterrows()
+            if str(a.event_id) != str(b.event_id)
+        ]
+
     # Собираем все пары A и B
     all_prompts = []
     all_pairs = []
+    id_to_row = {str(r.event_id): r for _, r in df.iterrows()}
+    from src.schemas.main_schemas import ChatItem  # уже есть у вас
 
-    for _, row_a in tqdm(targets.iterrows(), total=len(targets), desc="Collecting pairs"):
-        a_id = int(row_a.event_id)
-        a_text = (
-            f"Текст: {row_a.raw_text}\n"
-            f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
-            f"Ресурсы: {row_a.resources}"
-        )
-
-        # Кандидаты B (исключая A_id)
-        candidates = df[df.event_id != a_id].iloc[second_col_l:second_col_u]
-
-        for _, row_b in candidates.iterrows():
-            b_id = int(row_b.event_id)
-            b_text = (
-                f"Текст: {row_b.raw_text}\n"
-                f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
-                f"Ресурсы: {row_b.resources}"
-            )
-            prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
-            all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
-            all_pairs.append((a_id, b_id))  # ← Сохраняем пары A_id и B_id
+    for a_id, b_id in candidate_pairs:
+        row_a, row_b = id_to_row[a_id], id_to_row[b_id]
+        a_text = f"Текст: {row_a.raw_text}\nРегион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; Ресурсы: {row_a.resources}"
+        b_text = f"Текст: {row_b.raw_text}\nРегион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; Ресурсы: {row_b.resources}"
+        prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)  # у вас уже определён
+        all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
+        all_pairs.append((int(a_id), int(b_id)))
     
     responses = []
     for i in range(0, len(all_prompts), cfg.vllm_engine_config.max_batch_size):
@@ -218,6 +223,11 @@ def process_file(
     )
     df = pd.read_csv(raw_csv)
     # Enrich metadata
+
+    search_dir = output_dir / "search_index"
+    searcher = EventsSemanticSearch(workdir=search_dir, cfg=BuildConfig(force_cpu=False), enable_rerank=True)
+    searcher.build_from_dataframe(df)
+
     enriched_df = enrich_with_metadata(
         df=df,
         vllm_engine=vllm_engine,
@@ -227,15 +237,17 @@ def process_file(
     enriched_df.to_csv(enriched_csv, index=False)
     print(f"✔ enriched CSV → {enriched_csv}")
 
+    pairs = searcher.similar_pairs_for_all(enriched_df, text_col="raw_text", id_col="event_id", top_k_per_event=20)
+    
     # Risk matrix
     risk_csv = output_dir / f"risk_{name}.csv"
     risk_matrix(
         enriched_csv=enriched_csv,
-        first_col_l=0,
-        first_col_u=len(enriched_df),
-        second_col_l=0,
-        second_col_u=len(enriched_df),
-        out_csv=risk_csv
+        first_col_l=0, first_col_u=len(enriched_df),
+        second_col_l=0, second_col_u=len(enriched_df),
+        out_csv=risk_csv,
+        candidate_pairs=pairs,
+        searcher=searcher
     )
     print(f"✔ processed {name} → {risk_csv}")
 
