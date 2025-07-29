@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from src.utils import embeddings
+from src.utils import embeddings_search as embeddings
 import numpy as np
 
 def test_text_to_embeddings(monkeypatch, tmp_path):
@@ -13,7 +13,7 @@ def test_text_to_embeddings(monkeypatch, tmp_path):
 
 
 def test_text_to_embeddings_empty(monkeypatch):
-    from src.utils import embeddings
+    from src.utils import embeddings_search as embeddings
     import pandas as pd
     df = pd.DataFrame()
     monkeypatch.setattr(embeddings, "SentenceTransformer", lambda name: type("M", (), {"encode": lambda self, texts, **kw: []})())
