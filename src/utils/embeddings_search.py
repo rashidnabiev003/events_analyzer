@@ -10,6 +10,12 @@ import pandas as pd
 import torch
 
 try:
+    from FlagEmbedding import BGEM3FlagModel
+    _HAS_BGE = True
+except Exception:
+    _HAS_BGE = False
+
+try:
     import faiss  # faiss-cpu или faiss-gpu
 except Exception as e:
     raise RuntimeError("FAISS is required (pip install faiss-cpu или faiss-gpu).") from e
@@ -24,8 +30,11 @@ def _l2_normalize(x: np.ndarray) -> np.ndarray:
 class BuildConfig:
     model_name: str = "BAAI/bge-m3"
     batch_size: int = 64
-    force_cpu: bool = False  # True — всё на CPU (без конкуренции за VRAM)
-
+    force_cpu: bool = False          # эмбеддер на CPU
+    enable_rerank: bool = True       # включать реранкер
+    rerank_device: str = "cpu"       # "cuda" или "cpu"
+    rerank_batch_size: int = 2048    # размер батча пар для compute_score
+    use_fp16_rerank: bool = True     # FP16 на GPU
 
 class EventsSemanticSearch:
     """
@@ -47,6 +56,15 @@ class EventsSemanticSearch:
         self.index: Optional[faiss.Index] = None
         self.metadata: List[Dict] = []
         self.embedder = None
+        self.reranker = None
+    
+    def _load_reranker(self):
+        if not (self.cfg.enable_rerank and _HAS_BGE):
+            return
+        if self.reranker is None:
+            device = self.cfg.rerank_device
+            use_fp16 = self.cfg.use_fp16_rerank and (device.startswith("cuda"))
+            self.reranker = BGEM3FlagModel(self.cfg.model_name, use_fp16=use_fp16, device=device)
 
     # ---------- public ----------
 
@@ -108,3 +126,100 @@ class EventsSemanticSearch:
             vec = self.embedder.encode(chunk, convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=False)
             all_emb.append(vec.astype("float32"))
         return np.vstack(all_emb)
+    
+    def make_pairs_percent(
+        self,
+        k_preselect: int = 50,             # сколько соседей на событие взять от FAISS
+        min_faiss_sim: float = 0.20,       # отсечь слабых ещё ДО реранка
+        sim_threshold: float | None = 0.5, # порог «по проценту схожести» (0..1); если None — используем keep_top_pct
+        keep_top_pct: float | None = None, # либо доля лучших на событие (например 0.3=30%); если None — используем sim_threshold
+        per_event_cap: int | None = None,  # жёсткий предел пар на событие после фильтров
+        id_col: str = "event_id",
+        dedup_bidirectional: bool = True,
+        use_reranker: bool = True,         # включить реранкер
+        metric_key: str = "colbert+sparse+dense",
+    ) -> list[tuple[str, str]]:
+        """
+        1) FAISS батчем: берём k_preselect соседей на событие (+1 self-match).
+        2) Фильтруем по min_faiss_sim.
+        3) (опц.) Батчевый реранк BGE-M3 compute_score.
+        4) Отбираем по sim_threshold ИЛИ keep_top_pct (на событие).
+        5) (опц.) dedup (A,B)==(B,A), cap на событие.
+        """
+        assert self.index is not None, "index is not loaded"
+        emb = np.load(self.embed_path)
+        # FAISS: cosine sim, т.к. эмбеддинги L2-нормализованы
+        D, I = self.index.search(emb, k_preselect + 1)
+
+        # 1) Собираем кандидатов
+        pairs_idx: list[tuple[int, int]] = []
+        pairs_sim_faiss: list[float] = []
+        for a_idx, neighs in enumerate(I):
+            for rank, b_idx in enumerate(neighs):
+                if b_idx == -1 or b_idx == a_idx:
+                    continue
+                sim = float(D[a_idx, rank])
+                if sim < min_faiss_sim:
+                    continue
+                pairs_idx.append((a_idx, b_idx))
+                pairs_sim_faiss.append(sim)
+
+        if not pairs_idx:
+            return []
+
+        # 2) Батчевый реранкинг (опционально)
+        rerank_scores: list[float] | None = None
+        if use_reranker and self.cfg.enable_rerank and _HAS_BGE:
+            self._load_reranker()
+            pairs_text = [[self.metadata[a]["text"], self.metadata[b]["text"]] for a, b in pairs_idx]
+            rerank_scores = []
+            bs = self.cfg.rerank_batch_size
+            for i in range(0, len(pairs_text), bs):
+                chunk = pairs_text[i:i+bs]
+                out = self.reranker.compute_score(chunk)
+                scores = out.get(metric_key) or out.get("colbert+sparse+dense")
+                if isinstance(scores, list):
+                    rerank_scores.extend([float(s) for s in scores])
+                else:
+                    # на всякий случай
+                    rerank_scores.extend([float(scores)] * len(chunk))
+
+        # 3) Группируем по A, применяем порог/перцентиль
+        from collections import defaultdict
+        by_a: dict[int, list[tuple[int, float]]] = defaultdict(list)  # a_idx -> [(b_idx, score), ...]
+        for k, (a_idx, b_idx) in enumerate(pairs_idx):
+            score = rerank_scores[k] if rerank_scores is not None else pairs_sim_faiss[k]
+            by_a[a_idx].append((b_idx, score))
+
+        result_pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for a_idx, items in by_a.items():
+            # сортировка по score убыв.
+            items.sort(key=lambda x: x[1], reverse=True)
+
+            # выборка по порогу или по перцентилю
+            selected: list[tuple[int, float]]
+            if sim_threshold is not None:
+                selected = [(b, s) for (b, s) in items if s >= sim_threshold]
+                if per_event_cap is not None:
+                    selected = selected[:per_event_cap]
+            else:
+                assert keep_top_pct is not None and 0 < keep_top_pct <= 1
+                k_keep = max(1, int(round(len(items) * keep_top_pct)))
+                if per_event_cap is not None:
+                    k_keep = min(k_keep, per_event_cap)
+                selected = items[:k_keep]
+
+            a_id = str(self.metadata[a_idx][id_col])
+            for b_idx, _ in selected:
+                b_id = str(self.metadata[b_idx][id_col])
+                if dedup_bidirectional:
+                    key = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                result_pairs.append((a_id, b_id))
+
+        return result_pairs
+

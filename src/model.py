@@ -149,7 +149,6 @@ def risk_matrix(
     second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     candidate_pairs: Optional[List[tuple[int, int]]] = None,
-    searcher: Optional[EventsSemanticSearch] = None,
     engine: VLLMEngine | None = None
 ) -> None:
     df = pd.read_csv(enriched_csv)
@@ -241,9 +240,28 @@ def process_file(
     print(f"✔ enriched CSV → {enriched_csv}")
 
     search_dir = output_dir / "search_index"
-    searcher = EventsSemanticSearch(workdir=search_dir, cfg=BuildConfig(force_cpu=True))
+    searcher = EventsSemanticSearch(
+        workdir=search_dir,
+        cfg=BuildConfig(
+            force_cpu=True,          # эмбеддер/FAISS на CPU
+            enable_rerank=True,
+            rerank_device="cpu",     # или "cuda" при наличии VRAM
+            rerank_batch_size=2048,
+            use_fp16_rerank=True
+        )
+    )
     searcher.build_from_dataframe(enriched_df, text_col="raw_text", id_col="event_id")
-    pairs = searcher.batch_similar_pairs_for_all(top_k_per_event=20, id_col="event_id")    
+    pairs = searcher.make_pairs_percent(
+        k_preselect=50,
+        min_faiss_sim=0.20,
+        sim_threshold=0.50,      # «процент схожести» как порог
+        keep_top_pct=0.30,
+        min_per_event=3,
+        per_event_cap=50,
+        id_col="event_id",
+        dedup_bidirectional=True,
+        use_reranker=True
+    )    
     # Risk matrix
     risk_csv = output_dir / f"risk_{name}.csv"
     risk_matrix(
@@ -252,7 +270,6 @@ def process_file(
         second_col_l=0, second_col_u=len(enriched_df),
         out_csv=risk_csv,
         candidate_pairs=pairs,
-        searcher=searcher,
         engine=engine
     )
     print(f"✔ processed {name} → {risk_csv}")
