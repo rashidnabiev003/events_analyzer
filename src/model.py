@@ -12,7 +12,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
 	sys.path.insert(0, str(ROOT))
 from typing import Any, Dict, List
-from src.vllm_engine import VLLMEngine
 from src.utils.data_loader import build_raw
 from src.schemas.main_schemas import (AppConfig,
                                         Clast,
@@ -74,32 +73,36 @@ total_risk = time_level + resource_level // диапазон 0–8
   total_risk = time_level + resource_level       # 0-8  
   probability_failure = total_risk / 8 # с двумя знаками
 
+Примечание:
+1. НЕ ПИШИ расчеты в поле объяснения "reason", цифр там быть не должно
+2. И есть главное правило по времени пример : мероприятие 2025 года может зависеть от 2025, но не может зависеть от 2026, а вот 2026 может и от 2025, и от 2026.
+
 **Формат ответа (строго JSON):**
 {
   "risk": <float>  # ДОЛЖЕН равняться probability_failure
   "reason": "Исходное мероприятие: ...\nНаиболее связанное мероприятие: ...\nОбъяснение зависимости: ..."
 }
-Если в расчётах ошибся — исправь и выведи верный JSON.
 """
 )
 SYSTEM_METADATA_PROMPT = (
 """
-Ты помощник по извлечению метаданных из мероприятия
-Извлеки JSON с полями:
-region  – регион (строка),
-start   – дата/квартал начала (строка),
-end     – дата/квартал окончания (строка),
-resources – список ключевых ресурсов или подрядчиков (массив строк).
+Ты извлекаешь метаданные. Верни СТРОГО один валидный JSON-объект ровно с ключами:
+{"region": "<строка>", "resources": ["<строка>", ...]}
+
+Только JSON, без какого-либо текста/Markdown до или после.
+Если данных нет — region="", resources=[].
+Ответ ДОЛЖЕН начинаться с "{" и заканчиваться "}".
 """
 )
 
 METADATA_PROMPT = """
 Извлеки JSON с полями:
 region  – регион (строка),
-start   – дата/квартал начала (строка),
-end     – дата/квартал окончания (строка),
 resources – список ключевых ресурсов или подрядчиков (массив строк).
-
+{{
+  "region": <str>,
+  "resources": <массив str>
+}}
 Текст мероприятия:
 \"\"\"{text}\"\"\"
 """
@@ -125,7 +128,7 @@ RAW_DIR.mkdir(exist_ok=True)
 
 def enrich_with_metadata_df(
     df: pd.DataFrame,
-    vllm_engine: VLLMEngine,
+    vllm_engine,
     json_schema: Any
 ) -> pd.DataFrame:
     """
@@ -152,8 +155,6 @@ def enrich_with_metadata_df(
     # Populate DataFrame
     for idx, resp in enumerate(responses):
         df.at[idx, "region"] = resp.get("region", "")
-        df.at[idx, "start"] = resp.get("start", "")
-        df.at[idx, "end"] = resp.get("end", "")
         resources = resp.get("resources", [])
         df.at[idx, "resources"] = ";".join(resources) if isinstance(resources, list) else resources
 
@@ -182,9 +183,8 @@ def enrich_with_metadata(
     df = df.iloc[:n].copy()
 
     df["region"] = ""
-    df["start"] = ""
-    df["end"] = ""
     df["resources"] = ""
+    df["year"] = ""
 
     for idx, row in df.iterrows():
         prompt = METADATA_PROMPT.format(text=row["raw_text"])
@@ -194,8 +194,7 @@ def enrich_with_metadata(
         except Exception:
             data = {}
         df.at[idx, "region"] = data.get("region", "")
-        df.at[idx, "start"] = data.get("start", "")
-        df.at[idx, "end"] = data.get("end", "")
+        df.at[idx, "year"] = data.get("year", "")
         resources = data.get("resources", [])
         if isinstance(resources, list):
             resources = ";".join(resources)
@@ -218,7 +217,7 @@ def risk_matrix(
     second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     candidate_pairs: Optional[List[tuple[int, int]]] = None,
-    engine: VLLMEngine | None = None
+    engine = None, 
 ) -> None:
     df = pd.read_csv(enriched_csv)
 
@@ -242,12 +241,12 @@ def risk_matrix(
 
             a_text = (
                 f"Текст: {row_a.raw_text}\n"
-                f"Регион: {row_a.region}; Сроки: {row_a.start}-{row_a.end}; "
+                f"Регион: {row_a.region}; Год: {getattr(row_a, 'year', '')}; "
                 f"Ресурсы: {row_a.resources}"
             )
             b_text = (
                 f"Текст: {row_b.raw_text}\n"
-                f"Регион: {row_b.region}; Сроки: {row_b.start}-{row_b.end}; "
+                f"Регион: {row_a.region}; Год: {getattr(row_a, 'year', '')}; "
                 f"Ресурсы: {row_b.resources}"
             )
 
@@ -295,7 +294,7 @@ def get_xlsx_files(input_dir: Path) -> list[Path]:
 def process_file(
     xlsx_path: Path,
     output_dir: Path,
-    engine: VLLMEngine = None
+    engine,
 ) -> None:
     name = xlsx_path.stem
 
@@ -332,7 +331,6 @@ def process_file(
         min_faiss_sim=0.20,
         sim_threshold=0.50,      # «процент схожести» как порог
         keep_top_pct=0.30,
-        min_per_event=3,
         per_event_cap=50,
         id_col="event_id",
         dedup_bidirectional=True,
@@ -354,7 +352,7 @@ def process_file(
 def process_folder(
     input_dir: Path,
     output_dir: Path,
-    engine: VLLMEngine |None = None
+    engine,
 ) -> None:
     """
     Обходит все xlsx-файлы в input_dir и обрабатывает каждый через process_file().
@@ -390,11 +388,28 @@ def _parse_cli() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_cli()
+    USE_OPENWEBUI = os.getenv("USE_OPENWEBUI", "1") == "1"
+    print(USE_OPENWEBUI)
     # Инициализация движка VLLM 
-    engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_PROMPT)
+    if USE_OPENWEBUI:
+        from src.openwebui_engine import OpenWebUIEngine
+        engine = OpenWebUIEngine(
+            base_url=os.getenv("OPENWEBUI_BASE_URL", "https://webui.g-309.ru"),
+            api_key=os.getenv("OPENWEBUI_API_KEY", ""),
+            model=os.getenv("OPENWEBUI_MODEL", "gpt-oss:120b"),
+            timeout=float(os.getenv("OPENWEBUI_TIMEOUT", "60")),
+            max_concurrency=int(os.getenv("OPENWEBUI_CONCURRENCY", "16")),
+            system_prompt=SYSTEM_PROMPT,
+        )
+    else:
+        from src.vllm_engine import VLLMEngine
+        cfg = load_config()  # убедимся, что cfg загружен здесь
+        engine = VLLMEngine(engine_config=cfg.vllm_engine_config, system_prompt=SYSTEM_PROMPT)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.input_path.is_dir():
+        print(f"[process] folder: {args.input_path} -> {args.output_dir}")
         process_folder(args.input_path, args.output_dir, engine)
     else:
+        print(f"[process] file:   {args.input_path} -> {args.output_dir}")
         process_file(args.input_path, args.output_dir, engine)

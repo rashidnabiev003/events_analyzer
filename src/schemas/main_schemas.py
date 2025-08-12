@@ -27,8 +27,6 @@ class ModelJsonAnswer(BaseModel):
 
 class Clast(BaseModel):
     region : str
-    start: str
-    end: str
     resources : List[str]
 
 class RiskResp(BaseModel):
@@ -42,4 +40,5 @@ class ChatItem(BaseModel):
     prompt: str
     system_prompt: Optional[str] = None
     json_schema: Any = None
+
 
