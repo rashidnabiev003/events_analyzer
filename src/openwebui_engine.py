@@ -9,6 +9,11 @@ from tqdm import tqdm
 import requests
 # подправьте импорт под ваш layout (в model.py используется "src.schemas...")
 from src.schemas.main_schemas import ChatItem
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
 
 # опциональная валидация jsonschema
 try:

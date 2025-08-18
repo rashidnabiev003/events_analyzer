@@ -11,6 +11,11 @@ import pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]  
 if str(ROOT) not in sys.path:
 	sys.path.insert(0, str(ROOT))
+try:
+	from dotenv import load_dotenv  # type: ignore
+	load_dotenv()
+except Exception:
+	pass
 from typing import Any, Dict, List
 from src.utils.data_loader import build_raw
 from src.schemas.main_schemas import (AppConfig,
@@ -179,54 +184,6 @@ def enrich_with_metadata_df(
             df_slice.to_csv(out_csv, index=False, header=False, mode="a", encoding="utf-8")
 
     return df
-
-
-def enrich_with_metadata(
-    xlsx_path: Path | None,
-    lines: int,
-    out_csv: Path,
-    sleep_s: float = 0.0,
-    flag: int = 0,
-) -> Path:
-    """
-    Совместимость с тестами: читает CSV (out_csv), добавляет метаданные столбцы и перезаписывает его.
-    Использует функции chat() и extract_json(), которые могут быть подменены в тестах.
-    """
-    if not Path(out_csv).exists():
-        raise FileNotFoundError(f"Input CSV not found: {out_csv}")
-    df = pd.read_csv(out_csv)
-    required_cols = {"event_id", "raw_text"}
-    if not required_cols.issubset(df.columns):
-        raise ValueError("CSV must contain 'event_id' and 'raw_text' columns")
-
-    n = min(len(df), max(0, int(lines)))
-    df = df.iloc[:n].copy()
-
-    df["region"] = ""
-    df["resources"] = ""
-    df["year"] = ""
-
-    for idx, row in df.iterrows():
-        prompt = METADATA_PROMPT.format(text=row["raw_text"])
-        try:
-            resp_text = chat(prompt, system_prompt=SYSTEM_METADATA_PROMPT)
-            data = extract_json(resp_text)
-        except Exception:
-            data = {}
-        df.at[idx, "region"] = data.get("region", "")
-        df.at[idx, "year"] = data.get("year", "")
-        resources = data.get("resources", [])
-        if isinstance(resources, list):
-            resources = ";".join(resources)
-        df.at[idx, "resources"] = resources
-        if sleep_s:
-            try:
-                time.sleep(float(sleep_s))
-            except Exception:
-                pass
-
-    df.to_csv(out_csv, index=False)
-    return Path(out_csv)
 
 
 def risk_matrix(

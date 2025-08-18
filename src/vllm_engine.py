@@ -4,6 +4,11 @@ from typing import List, Dict, Any, Sequence, Optional
 from src.schemas.main_schemas import ChatItem, EngineConfig, RiskResp
 import json
 import re
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
 
 # Optional jsonschema validation
 try:
