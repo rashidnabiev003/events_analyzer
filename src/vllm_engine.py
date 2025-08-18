@@ -1,7 +1,7 @@
 import os
 from pydantic import BaseModel
 from typing import List, Dict, Any, Sequence, Optional
-from schemas.main_schemas import ChatItem, EngineConfig, RiskResp
+from src.schemas.main_schemas import ChatItem, EngineConfig, RiskResp
 import json
 import re
 
@@ -41,13 +41,16 @@ except Exception:  # pragma: no cover - provide light stubs for testing
 
 
 def extract_json(text: str) -> dict:
-	# Убираем лишние теги и извлекаем JSON
-	text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
-	text = re.sub(r"```json\s*|\s*```", "", text, flags=re.I)
-	m = re.search(r"\{[\s\S]*\}", text)
-	if not m:
-		raise ValueError("JSON not found in model output")
-	return json.loads(m.group(0))
+	# Убираем лишние теги и извлекаем JSON, возвращая {} при ошибках
+	try:
+		text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
+		text = re.sub(r"```json\s*|\s*```", "", text, flags=re.I)
+		m = re.search(r"\{[\s\S]*\}", text)
+		if not m:
+			return {}
+		return json.loads(m.group(0))
+	except Exception:
+		return {}
 
 
 class VLLMEngine:

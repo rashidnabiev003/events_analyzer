@@ -7,7 +7,7 @@ def build_raw(
     xlsx_path: Path,
     column_idx: Tuple[int, ...] = (0, 1, 2),   # (id, title, desc)
     out_path: Path = Path("data/raw.csv"),
-    sheet_name: Optional[str] = "Лист1",
+    sheet_name: Optional[str] = "Лист2",
     sep: str = " ",
 ) -> Path:
     df = pd.read_excel(

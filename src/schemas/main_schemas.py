@@ -28,6 +28,9 @@ class ModelJsonAnswer(BaseModel):
 class Clast(BaseModel):
     region : str
     resources : List[str]
+    # дополнительные поля для совместимости с тестами/старым форматом
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 class RiskResp(BaseModel):
     risk: float

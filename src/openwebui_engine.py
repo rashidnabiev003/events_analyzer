@@ -4,6 +4,7 @@ import json
 import re
 from typing import List, Dict, Any, Sequence, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 import requests
 # подправьте импорт под ваш layout (в model.py используется "src.schemas...")
@@ -100,16 +101,21 @@ class OpenWebUIEngine:
         if not items:
             return []
         results: List[Optional[Dict[str, Any]]] = [None] * len(items)
+
         with ThreadPoolExecutor(max_workers=self.max_concurrency) as ex:
             futs = {
                 ex.submit(self._single, it, json_schema, max_retries): i
                 for i, it in enumerate(items)
             }
-            for fut in as_completed(futs):
-                i = futs[fut]
-                try:
-                    results[i] = fut.result()
-                except Exception as e:
-                    results[i] = {"risk": 0.0, "reason": f"openwebui_exc: {e}"}
+            # прогресс по завершению фьюч
+            with tqdm(total=len(futs), desc="OpenWebUI batch", unit="req") as pbar:
+                for fut in as_completed(futs):
+                    i = futs[fut]
+                    try:
+                        results[i] = fut.result()
+                    except Exception as e:
+                        results[i] = {"risk": 0.0, "reason": f"openwebui_exc: {e}"}
+                    finally:
+                        pbar.update(1)
 
         return [r or {"risk": 0.0, "reason": ""} for r in results]

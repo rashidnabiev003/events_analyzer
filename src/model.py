@@ -32,15 +32,15 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 
 def extract_json(text: str) -> dict:
-	text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
-	text = re.sub(r"```json\s*|\s*```", "", text, flags=re.I)
-	m = re.search(r"\{[\s\S]*\}", text)
-	if not m:
-		return {}
-	try:
-		return json.loads(m.group(0))
-	except Exception:
-		return {}
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I)
+    text = re.sub(r"```json\s*|\s*```", "", text, flags=re.I)
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
 
 
 def chat(*args, **kwargs) -> str:
@@ -125,38 +125,58 @@ cfg = load_config()
 RAW_DIR = Path("data")
 RAW_DIR.mkdir(exist_ok=True)
 
+# Глобальный движок (для тестов может быть подменён monkeypatch'ем)
+engine = None
+
 
 def enrich_with_metadata_df(
     df: pd.DataFrame,
     vllm_engine,
-    json_schema: Any
+    json_schema: Any,
+    out_csv: Path | None = None,
+    batch_size: int = 128
 ) -> pd.DataFrame:
     """
-    Обогащает DataFrame df метаданными через пакетные запросы vllm.
+    Обогащает df метаданными через пакетные запросы vllm/webui.
+    Пишет результат в CSV по частям (батчами), если задан out_csv.
+    Возвращает также полный DataFrame (собираем в памяти).
     """
-    # Prepare placeholder columns
-    for col in ("region", "start", "end", "resources"):
-        df[col] = ""
+    # гарантируем колонки
+    for col in ("region", "resources"):
+        if col not in df.columns:
+            df[col] = ""
 
-    # Build chat items for all rows
-    items = [
-        ChatItem(
-            system_prompt=SYSTEM_METADATA_PROMPT,
-            prompt=METADATA_PROMPT.format(text=raw_text)
-        ) for raw_text in df["raw_text"].tolist()
+    items_all: list[ChatItem] = [
+        ChatItem(system_prompt=SYSTEM_METADATA_PROMPT,
+                 prompt=METADATA_PROMPT.format(text=raw_text))
+        for raw_text in df["raw_text"].astype(str).tolist()
     ]
 
-    # Batch request to VLLMEngine
-    responses = vllm_engine.chat_batch(
-        items=items,
-        json_schema=json_schema
-    )
+    # подготовка CSV: шапка (перезаписываем файл)
+    if out_csv:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        df.head(0)[["event_id", "raw_text", "year", "region", "resources"]].to_csv(
+            out_csv, index=False, encoding="utf-8"
+        )
 
-    # Populate DataFrame
-    for idx, resp in enumerate(responses):
-        df.at[idx, "region"] = resp.get("region", "")
-        resources = resp.get("resources", [])
-        df.at[idx, "resources"] = ";".join(resources) if isinstance(resources, list) else resources
+    from tqdm import tqdm
+    for start in tqdm(range(0, len(items_all), batch_size), desc="enrich", unit="row"):
+        end = start + batch_size
+        batch_items = items_all[start:end]
+        responses = vllm_engine.chat_batch(items=batch_items, json_schema=json_schema)
+
+        # переносим ответы в df
+        for k, resp in enumerate(responses, start=start):
+            df.at[k, "region"] = resp.get("region", "")
+            res = resp.get("resources", [])
+            if isinstance(res, list):
+                res = ";".join(res)
+            df.at[k, "resources"] = res
+
+        # инкрементально дозаписываем только обновлённый срез
+        if out_csv:
+            df_slice = df.iloc[start:end][["event_id", "raw_text", "year", "region", "resources"]]
+            df_slice.to_csv(out_csv, index=False, header=False, mode="a", encoding="utf-8")
 
     return df
 
@@ -211,13 +231,13 @@ def enrich_with_metadata(
 
 def risk_matrix(
     enriched_csv: Path = RAW_DIR / "enriched.csv",
-    first_col_l: int = 0 ,
+    first_col_l: int = 0,
     first_col_u: int = 10,
     second_col_l: int = 0,
     second_col_u: int = 50,
     out_csv: Path = RAW_DIR / "risk_matrix.csv",
     candidate_pairs: Optional[List[tuple[int, int]]] = None,
-    engine = None, 
+    engine=None,
 ) -> None:
     df = pd.read_csv(enriched_csv)
 
@@ -236,52 +256,56 @@ def risk_matrix(
     all_pairs: List[tuple[int, int]] = []
 
     for a_id_str, b_id_str in tqdm(candidate_pairs, total=len(candidate_pairs), desc="Collecting pairs"):
-            a_id, b_id = int(a_id_str), int(b_id_str)
-            row_a, row_b = id_to_row[a_id], id_to_row[b_id]
+        a_id, b_id = int(a_id_str), int(b_id_str)
+        row_a, row_b = id_to_row[a_id], id_to_row[b_id]
 
-            a_text = (
-                f"Текст: {row_a.raw_text}\n"
-                f"Регион: {row_a.region}; Год: {getattr(row_a, 'year', '')}; "
-                f"Ресурсы: {row_a.resources}"
-            )
-            b_text = (
-                f"Текст: {row_b.raw_text}\n"
-                f"Регион: {row_a.region}; Год: {getattr(row_a, 'year', '')}; "
-                f"Ресурсы: {row_b.resources}"
-            )
+        a_text = (
+            f"Текст: {row_a.raw_text}\n"
+            f"Регион: {row_a.region}; Год: {getattr(row_a, 'year', '')}; "
+            f"Ресурсы: {row_a.resources}"
+        )
+        b_text = (
+            f"Текст: {row_b.raw_text}\n"
+            f"Регион: {row_b.region}; Год: {getattr(row_b, 'year', '')}; "
+            f"Ресурсы: {row_b.resources}"
+        )
 
-            prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
-            all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
-            all_pairs.append((a_id, b_id))
-    
-    # prefer passed engine, else fallback to module-level engine if available
-    engine = engine or globals().get("engine")  # type: ignore[assignment]
+        prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
+        all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
+        all_pairs.append((a_id, b_id))
 
-    responses: List[Dict] = []
-    for i in range(0, len(all_prompts), cfg.vllm_engine_config.max_batch_size):
-        batch = all_prompts[i:i + cfg.vllm_engine_config.max_batch_size]
-        batch_responses = engine.chat_batch(batch, json_schema=RiskResp) if engine else [
-            {"risk": 0.0, "reason": ""} for _ in batch
-        ]
-        responses.extend(batch_responses)
-    
-    # Записываем результаты в CSV
-    out_csv.parent.mkdir(exist_ok=True, parents=True)
-    with open(out_csv, "w", newline="", encoding="utf-8") as csvfile:
-        fieldnames = ["A_id", "B_id", "risk", "reason"]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    engine = engine or globals().get("engine")
+
+    total = len(all_prompts)
+    bs = cfg.vllm_engine_config.max_batch_size
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="", encoding="utf-8") as csvfile, \
+         tqdm(total=total, desc="risk", unit="pair") as pbar:
+        writer = csv.DictWriter(csvfile, fieldnames=["A_id", "B_id", "risk", "reason"])
         writer.writeheader()
 
-        for (a_id, b_id), response in zip(all_pairs, responses):
-            record = {
-                "A_id": a_id,
-                "B_id": b_id,
-                "risk": float(response.get("risk", 0.0)),
-                "reason": response.get("reason", "")
-            }
-            writer.writerow(record)
-            
+        for i in range(0, total, bs):
+            batch_prompts = all_prompts[i:i + bs]
+            batch_pairs   = all_pairs[i:i + bs]
+
+            batch_responses = engine.chat_batch(batch_prompts, json_schema=RiskResp) if engine else [
+                {"risk": 0.0, "reason": ""} for _ in batch_prompts
+            ]
+
+            for (a_id, b_id), response in zip(batch_pairs, batch_responses):
+                writer.writerow({
+                    "A_id": a_id,
+                    "B_id": b_id,
+                    "risk": float(response.get("risk", 0.0)),
+                    "reason": response.get("reason", "")
+                })
+
+            csvfile.flush()
+            pbar.update(len(batch_prompts))
+
     print(f"✔ risk matrix → {out_csv}")
+
 
 
 def get_xlsx_files(input_dir: Path) -> list[Path]:
@@ -305,13 +329,14 @@ def process_file(
     )
     df = pd.read_csv(raw_csv)
 
-    enriched_df = enrich_with_metadata_df(
-        df=df,
-        vllm_engine=engine,
-        json_schema=Clast
-    )
     enriched_csv = output_dir / f"enriched_{name}.csv"
-    enriched_df.to_csv(enriched_csv, index=False)
+    enriched_df = enrich_with_metadata_df(
+    df=df,
+    vllm_engine=engine,
+    json_schema=Clast,
+    out_csv=enriched_csv,          # <<< инкрементальная запись
+    batch_size=128
+)
     print(f"✔ enriched CSV → {enriched_csv}")
 
     search_dir = output_dir / "search_index"
