@@ -157,12 +157,15 @@ def enrich_with_metadata_df(
         for raw_text in df["raw_text"].astype(str).tolist()
     ]
 
-    # подготовка CSV: шапка (перезаписываем файл)
-    if out_csv:
-        out_csv.parent.mkdir(parents=True, exist_ok=True)
-        df.head(0)[["event_id", "raw_text", "year", "region", "resources"]].to_csv(
-            out_csv, index=False, encoding="utf-8"
-        )
+    header_cols = ["event_id"]
+    if "np_name" in df.columns:
+        header_cols.append("np_name")
+    if "year" in df.columns:
+        header_cols.append("year")
+    header_cols += ["raw_text", "region", "resources"]
+
+    # шапка
+    df.head(0)[header_cols].to_csv(out_csv, index=False, encoding="utf-8")
 
     from tqdm import tqdm
     for start in tqdm(range(0, len(items_all), batch_size), desc="enrich", unit="row"):
@@ -179,9 +182,8 @@ def enrich_with_metadata_df(
             df.at[k, "resources"] = res
 
         # инкрементально дозаписываем только обновлённый срез
-        if out_csv:
-            df_slice = df.iloc[start:end][["event_id", "raw_text", "year", "region", "resources"]]
-            df_slice.to_csv(out_csv, index=False, header=False, mode="a", encoding="utf-8")
+        df_slice = df.iloc[start:end][header_cols]
+        df_slice.to_csv(out_csv, index=False, header=False, mode="a", encoding="utf-8")
 
     return df
 
@@ -230,8 +232,6 @@ def risk_matrix(
         prompt = RISK_PROMPT.format(a_text=a_text, b_text=b_text)
         all_prompts.append(ChatItem(prompt=prompt, system_prompt=SYSTEM_PROMPT))
         all_pairs.append((a_id, b_id))
-
-    engine = engine or globals().get("engine")
 
     total = len(all_prompts)
     bs = cfg.vllm_engine_config.max_batch_size
@@ -318,6 +318,10 @@ def process_file(
         dedup_bidirectional=True,
         use_reranker=True
     )    
+    if "np_name" in enriched_df.columns:
+        id_to_np = {str(r.event_id): str(r.np_name) for _, r in enriched_df.iterrows()}
+        pairs = [(a, b) for (a, b) in pairs if id_to_np.get(str(a)) == id_to_np.get(str(b))]
+
     # Risk matrix
     risk_csv = output_dir / f"risk_{name}.csv"
     risk_matrix(
